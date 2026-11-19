@@ -74,6 +74,21 @@
 
     /* Chat area */
     .messages-container { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 20px; scroll-behavior: smooth; }
+
+    /* Task runner banner */
+    .task-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 14px; background: rgba(99,102,241,0.08); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+    .task-banner.hidden { display: none; }
+    .task-banner-main { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
+    .task-banner-label { font-size: 10px; letter-spacing: 0.1em; color: var(--accent); border: 1px solid var(--accent-glow); background: var(--accent-glow); padding: 2px 6px; border-radius: 4px; }
+    .task-banner-title { font-size: 13px; max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .task-banner-meta { font-size: 11px; color: var(--text-dim); }
+    .task-banner-actions { display: flex; align-items: center; gap: 6px; }
+    .task-pill { font-size: 11px; padding: 2px 8px; border-radius: 20px; border: 1px solid var(--border); color: var(--text-muted); }
+    .task-pill.in_progress { color: #93c5fd; border-color: rgba(147,197,253,0.35); background: rgba(59,130,246,0.12); }
+    .task-pill.review { color: var(--warning); border-color: rgba(245,158,11,0.35); background: rgba(245,158,11,0.1); }
+    .task-pill.done { color: var(--success); border-color: rgba(16,185,129,0.35); background: rgba(16,185,129,0.1); }
+    .app-toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--bg-panel); border: 1px solid var(--border); padding: 10px 16px; border-radius: 8px; font-size: 13px; z-index: 80; }
+    .app-toast.error { border-color: rgba(239,68,68,0.5); color: #fca5a5; }
     .welcome-screen { margin: auto; max-width: 640px; text-align: center; display: flex; flex-direction: column; gap: 20px; padding: 40px 20px; }
     .welcome-icon { width: 64px; height: 64px; border-radius: 16px; background: linear-gradient(135deg, var(--accent), #a855f7); display: flex; align-items: center; justify-content: center; font-size: 32px; margin: 0 auto; box-shadow: 0 0 24px var(--accent-glow); }
     .welcome-title { font-size: 24px; font-weight: 700; letter-spacing: -0.5px; }
@@ -201,6 +216,7 @@
       <div class="sidebar-tab active" onclick="switchSidebarTab('chats')">Chats</div>
       <div class="sidebar-tab" onclick="switchSidebarTab('files')">Files</div>
       <div class="sidebar-tab" onclick="switchSidebarTab('memory')">Memory</div>
+      <div class="sidebar-tab" onclick="switchSidebarTab('kilo')">Kilo</div>
       <div class="sidebar-tab" onclick="switchSidebarTab('settings')">Settings</div>
     </div>
     <div id="tab-chats" class="sidebar-pane active">
@@ -214,7 +230,7 @@
           <button class="btn btn-sm btn-secondary" onclick="openNewFileModal()">+ File</button>
         </div>
       </div>
-      <div class="drop-zone" onclick="document.getElementById('file-upload-input').click()">
+      <div class="drop-zone" onclick="document.getElementById('file-upload-input').click()" ondragover="event.preventDefault()" ondrop="handleDrop(event)">
         📎 Drop or click to upload document<br><small style="opacity:0.7;">PDF, TXT, MD, code files</small>
       </div>
       <input type="file" id="file-upload-input" multiple style="display:none;" onchange="handleFileUploads(this.files)">
@@ -227,13 +243,20 @@
       </div>
       <div id="memory-list-container" style="display: flex; flex-direction: column; gap: 8px;"></div>
     </div>
+    <div id="tab-kilo" class="sidebar-pane">
+      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+        <span style="font-size: 12px; font-weight: 600; color: var(--text-muted);">KILO AGENT SESSIONS</span>
+        <button class="btn btn-sm btn-primary" onclick="createKiloSession()">+ New Session</button>
+      </div>
+      <div id="kilo-sessions-list" style="display: flex; flex-direction: column; gap: 6px; flex: 1; overflow-y: auto;"></div>
+    </div>
     <div id="tab-settings" class="sidebar-pane">
       <div class="settings-section">
         <label>Ollama Model</label>
         <select id="settings-model-select" class="model-selector" onchange="changeModel(this.value)"></select>
         <div class="active-doc-indicator" id="active-doc-indicator" style="display:none;">
           <span>📄 Active: <span id="active-doc-name"></span></span>
-          <button class="btn btn-sm btn-secondary" onclick="clearActiveDocument()">Clear</button>
+          <button class="btn btn-sm btn-secondary" onclick="closeActiveDocument()">Clear</button>
         </div>
       </div>
       <div class="settings-section">
@@ -261,7 +284,17 @@
       </div>
       <div class="nav-actions">
         <div class="status-badge" id="ollama-status"><div class="status-dot"></div><span id="ollama-status-text">Checking Ollama...</span></div>
+        <div class="status-badge" id="kilo-status"><div class="status-dot"></div><span id="kilo-status-text">Checking Kilo...</span></div>
         <select id="header-model-select" class="model-selector" onchange="changeModel(this.value)"><option value="qwen2.5-coder:1.5b">qwen2.5-coder:1.5b</option></select>
+        <select id="kilo-agent-select" class="model-selector" onchange="changeKiloAgent(this.value)" style="min-width: 140px;">
+          <option value="master">🎯 Master</option>
+          <option value="it">🛠️ IT</option>
+          <option value="admin">🗂️ Admin</option>
+          <option value="marketing">📣 Marketing</option>
+          <option value="code">💻 Code</option>
+          <option value="plan">📋 Plan</option>
+        </select>
+        <a class="btn btn-sm btn-secondary" href="/dashboard" title="Ops dashboard: calendar & tasks">📅 Dashboard</a>
         <button class="btn btn-sm btn-secondary" onclick="clearCurrentChat()" title="Clear Chat">🗑️ Clear</button>
       </div>
     </header>
@@ -306,6 +339,20 @@
           <div style="font-weight: 600; font-size: 14px;">AI Document Co-Pilot</div>
           <div style="font-size: 11px; color: var(--text-dim);">Context-aware</div>
         </div>
+        <div class="task-banner hidden" id="task-banner">
+          <div class="task-banner-main">
+            <span class="task-banner-label">TASK</span>
+            <strong id="task-banner-title"></strong>
+            <span class="task-pill" id="task-banner-status"></span>
+            <span class="task-banner-meta" id="task-banner-meta"></span>
+          </div>
+          <div class="task-banner-actions">
+            <button class="btn btn-sm btn-secondary" onclick="setTaskStatus('review')">Mark review</button>
+            <button class="btn btn-sm btn-secondary" onclick="setTaskStatus('done')">Mark done</button>
+            <a class="btn btn-sm btn-secondary" href="/dashboard">Back to dashboard</a>
+            <button class="btn btn-sm btn-secondary" onclick="dismissTaskBanner()" title="Detach task (session stays)">✕</button>
+          </div>
+        </div>
         <div class="messages-container" id="messages-container">
           <div class="welcome-screen" id="welcome-screen">
             <div class="welcome-icon">⚡</div>
@@ -323,6 +370,7 @@
                 <div class="toolbar-left">
                   <button class="btn btn-sm btn-secondary" onclick="openFilePickerModal()">📎 Attach File</button>
                   <button class="btn btn-sm btn-secondary" onclick="applyCoPilotEdit()">✨ Apply Edit to Doc</button>
+                  <button class="btn btn-sm btn-primary" onclick="createKiloSession()" title="New Kilo Agent Session">🤖 Kilo</button>
                 </div>
                 <div class="toolbar-right">
                   <button class="btn btn-sm btn-secondary" id="stop-btn" style="display: none;" onclick="stopGeneration()">⏹️ Stop</button>
@@ -388,13 +436,24 @@
     let attachedFiles = []; let chatSessions = []; let currentSessionId = null;
     let isGenerating = false; let abortController = null; let currentEditingFilepath = null;
     let activeDocumentPath = null; let activeDocumentType = null; let activeDocumentText = '';
+    // Kilo state
+    let kiloAgent = 'master'; let kiloSessions = []; let currentKiloSessionId = null;
+    let kiloAbortController = null; let isKiloGenerating = false; let kiloModels = [];
+    let activeTask = null; let taskAutoRan = false;
 
     // Init
     window.addEventListener('DOMContentLoaded', async () => {
-      loadSessionsFromStorage(); await checkHealthAndModels(); await loadDirectory(); await loadMemories();
+      loadSessionsFromStorage(); loadSettingsFromStorage(); 
+      await checkHealthAndModels(); 
+      await loadDirectory(); await loadMemories();
+      await checkKiloHealth();
+      await loadKiloSessions();
+      setInterval(checkKiloHealth, 30000);
       renderChatSessionsList();
+      renderKiloSessionsList();
       if (!currentSessionId || !chatSessions.find(s => s.id === currentSessionId)) startNewChat();
       else renderCurrentChat();
+      await loadTaskContext();
     });
 
     // ---------- Health & Models ----------
@@ -406,7 +465,12 @@
         else { badge.classList.add('offline'); text.textContent = 'Ollama Offline'; }
         if (healthData.workspace) { document.getElementById('settings-workspace-path').value = healthData.workspace; document.getElementById('workspace-subtext').textContent = healthData.workspace; }
         const modelsRes = await fetch('/api/models');
-        if (modelsRes.ok) { availableModels = (await modelsRes.json()).models || []; populateModelDropdowns(); }
+        if (modelsRes.ok) { availableModels = (await modelsRes.json()).models || []; }
+        try {
+          const kiloRes = await fetch('/api/kilo/models');
+          if (kiloRes.ok) kiloModels = (await kiloRes.json()).models || [];
+        } catch {}
+        populateModelDropdowns();
       } catch (err) {
         document.getElementById('ollama-status').classList.add('offline');
         document.getElementById('ollama-status-text').textContent = 'Server Offline';
@@ -416,19 +480,379 @@
     function populateModelDropdowns() {
       const headerSelect = document.getElementById('header-model-select'); const settingsSelect = document.getElementById('settings-model-select');
       headerSelect.innerHTML = ''; settingsSelect.innerHTML = '';
+      const targets = [headerSelect, settingsSelect];
       if (availableModels.length === 0) {
-        const opt = new Option('qwen2.5-coder:1.5b', 'qwen2.5-coder:1.5b');
-        headerSelect.add(opt); settingsSelect.add(opt.cloneNode(true)); return;
+        targets.forEach(t => t.add(new Option('qwen2.5-coder:1.5b', 'qwen2.5-coder:1.5b')));
+      } else {
+        availableModels.forEach(m => {
+          targets.forEach(t => {
+            const o = new Option(m.name, m.name);
+            if (m.name === activeModel) o.selected = true;
+            t.add(o);
+          });
+        });
       }
-      availableModels.forEach(m => {
-        const o1 = new Option(m.name, m.name); const o2 = new Option(m.name, m.name);
-        if (m.name === activeModel || m.name.startsWith(activeModel)) { o1.selected = true; o2.selected = true; }
-        headerSelect.add(o1); settingsSelect.add(o2);
-      });
+      if (kiloModels.length) {
+        targets.forEach(t => {
+          const group = document.createElement('optgroup');
+          group.label = '🤖 Kilo Gateway';
+          kiloModels.forEach(m => {
+            const value = 'kilo/' + m.id;
+            const o = new Option('Kilo · ' + m.name, value);
+            if (value === activeModel) o.selected = true;
+            group.appendChild(o);
+          });
+          t.appendChild(group);
+        });
+      }
       activeModel = headerSelect.value;
     }
 
     function changeModel(modelName) { activeModel = modelName; document.getElementById('header-model-select').value = modelName; document.getElementById('settings-model-select').value = modelName; }
+
+    function changeKiloAgent(agent) { kiloAgent = agent; document.getElementById('kilo-agent-select').value = agent; }
+
+    // ---------- Kilo Health & Sessions ----------
+    async function checkKiloHealth() {
+      try {
+        const res = await fetch('/api/kilo/health');
+        const data = await res.json();
+        const badge = document.getElementById('kilo-status');
+        const text = document.getElementById('kilo-status-text');
+        if (data.kiloStatus === 'online' || data.healthy === true) {
+          badge.classList.remove('offline');
+          text.textContent = 'Kilo Online';
+        } else {
+          badge.classList.add('offline');
+          text.textContent = 'Kilo Offline';
+        }
+      } catch (err) {
+        document.getElementById('kilo-status').classList.add('offline');
+        document.getElementById('kilo-status-text').textContent = 'Kilo Unreachable';
+      }
+    }
+
+    async function loadKiloSessions() {
+      try {
+        const res = await fetch('/api/kilo/sessions');
+        const data = await res.json();
+        kiloSessions = data.sessions || data || [];
+        renderKiloSessionsList();
+      } catch (err) {
+        console.warn('Could not load Kilo sessions:', err.message);
+      }
+    }
+
+    async function createKiloSession() {
+      try {
+        const title = prompt('Session title:', `Task ${new Date().toLocaleTimeString()}`);
+        if (!title) return;
+        const res = await fetch('/api/kilo/session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title, agent: kiloAgent })
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        currentKiloSessionId = data.sessionId;
+        await loadKiloSessions();
+        switchSidebarTab('kilo');
+      } catch (err) { alert('Failed to create Kilo session: ' + err.message); }
+    }
+
+    async function selectKiloSession(sessionId) {
+      currentKiloSessionId = sessionId;
+      renderKiloSessionsList();
+      await loadKiloSessionMessages(sessionId);
+      // Show Kilo mode indicator
+      const indicator = document.getElementById('active-doc-indicator');
+      const session = kiloSessions.find(s => s.id === sessionId);
+      if (session) {
+        document.getElementById('active-doc-name').textContent = `Kilo: ${session.title} (${session.agent})`;
+        indicator.style.display = 'flex';
+        indicator.style.background = 'rgba(16, 185, 129, 0.1)';
+        indicator.style.borderColor = 'rgba(16, 185, 129, 0.2)';
+        indicator.style.color = '#10b981';
+      }
+    }
+
+    async function loadKiloSessionMessages(sessionId) {
+      try {
+        const res = await fetch(`/api/kilo/session/${sessionId}/messages`);
+        const data = await res.json();
+        // Display Kilo messages in chat panel
+        renderKiloMessages(Array.isArray(data) ? data : (data.messages || []));
+      } catch (err) { console.error('Failed to load Kilo messages:', err); }
+    }
+
+    function renderKiloSessionsList() {
+      const container = document.getElementById('kilo-sessions-list');
+      if (!container) return;
+      container.innerHTML = '';
+      if (!kiloSessions.length) {
+        container.innerHTML = '<div style="color: var(--text-dim); font-size: 12px; text-align: center; padding: 20px 0;">No Kilo sessions yet. Click + to create one.</div>';
+        return;
+      }
+      kiloSessions.forEach(s => {
+        const item = document.createElement('div');
+        item.className = 'chat-session-item' + (s.id === currentKiloSessionId ? ' active' : '');
+        item.onclick = () => selectKiloSession(s.id);
+        item.innerHTML = `
+          <span class="chat-session-title">${s.title || 'Untitled'} <span style="font-size:10px;color:var(--text-dim);">(${s.agent || 'master'})</span></span>
+          <span style="font-size: 10px; color: var(--text-dim);">${s.updatedAt ? new Date(s.updatedAt).toLocaleTimeString() : ''}</span>
+        `;
+        container.appendChild(item);
+      });
+    }
+
+    function renderKiloMessages(messages) {
+      const welcome = document.getElementById('welcome-screen');
+      if (welcome) welcome.style.display = 'none';
+      const messagesList = document.getElementById('messages-list');
+      messagesList.innerHTML = '';
+
+      const msgArray = Array.isArray(messages) ? messages : (messages.data || []);
+      msgArray.forEach(msg => {
+        const info = msg.info || msg;
+        const parts = msg.parts || msg.content || [];
+        const role = info.role || info.type || 'assistant';
+        const text = Array.isArray(parts)
+          ? parts.filter(p => p && p.type === 'text' && p.text).map(p => p.text).join('')
+          : (typeof parts === 'string' ? parts : '');
+        if (!text.trim()) return;
+
+        const row = document.createElement('div');
+        row.className = `message-row ${role === 'user' ? 'user' : 'assistant'}`;
+        const avatar = document.createElement('div');
+        avatar.className = 'message-avatar';
+        avatar.textContent = role === 'user' ? '👤' : '🤖';
+        const body = document.createElement('div');
+        body.className = 'message-body';
+        const header = document.createElement('div');
+        header.className = 'message-header';
+        const label = role === 'user' ? 'You' : `Kilo Agent${info.modelID ? ' · ' + info.modelID : ''}`;
+        header.innerHTML = `<span class="message-sender"></span>`;
+        header.querySelector('.message-sender').textContent = label;
+        const content = document.createElement('div');
+        content.className = 'message-content';
+        content.innerHTML = renderMarkdown(text);
+        body.appendChild(header);
+        body.appendChild(content);
+        row.appendChild(avatar);
+        row.appendChild(body);
+        messagesList.appendChild(row);
+      });
+      const c = document.getElementById('messages-container');
+      c.scrollTop = c.scrollHeight;
+    }
+
+    // Send message to Kilo session
+    async function sendKiloMessage(prefill) {
+      if (isKiloGenerating) return;
+      const input = document.getElementById('chat-input');
+      const text = (typeof prefill === 'string' && prefill.trim()) ? prefill.trim() : input.value.trim();
+      if (!text) return;
+      if (!currentKiloSessionId) {
+        try {
+          const created = await fetch('/api/kilo/session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title: text.slice(0, 40), agent: kiloAgent })
+          });
+          const createdData = await created.json();
+          if (createdData.error) throw new Error(createdData.error);
+          currentKiloSessionId = createdData.sessionId;
+          loadKiloSessions();
+        } catch (err) { alert('Could not start Kilo session: ' + err.message); return; }
+      }
+
+      const session = getCurrentSession(); if (!session) return;
+      const userMsg = { role: 'user', content: text };
+      session.messages.push(userMsg);
+      if (session.messages.length === 1) session.title = text.slice(0, 28);
+      if (!prefill) { input.value = ''; autoResizeTextarea(input); }
+      saveSessionsToStorage(); appendMessageElement(userMsg);
+
+      const assistantMsg = { role: 'assistant', content: '', model: 'kilo-' + kiloAgent };
+      const { row, content, body } = appendMessageElement(assistantMsg); content.classList.add('typing-cursor');
+      isKiloGenerating = true; document.getElementById('send-btn').style.display = 'none'; document.getElementById('stop-btn').style.display = 'inline-flex';
+      kiloAbortController = new AbortController();
+
+      try {
+        const res = await fetch(`/api/kilo/session/${currentKiloSessionId}/prompt_stream`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt: text, model: activeModel.startsWith('kilo/') ? activeModel : undefined, agent: kiloAgent }),
+          signal: kiloAbortController.signal
+        });
+        if (!res.ok) { const e = await res.text(); throw new Error(`Kilo error (${res.status}): ${e}`); }
+
+        const reader = res.body.getReader(); const decoder = new TextDecoder(); let accumulated = ''; let buffer = ''; let streamError = null;
+        const paint = () => { content.innerHTML = renderMarkdown(accumulated); document.getElementById('messages-container').scrollTop = document.getElementById('messages-container').scrollHeight; };
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n'); buffer = lines.pop();
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            let chunk;
+            try { chunk = JSON.parse(line); } catch { continue; }
+            if (chunk.error) { streamError = chunk.error; continue; }
+            if (chunk.delta) { accumulated += chunk.delta; paint(); }
+            if (chunk.done) {
+              if (chunk.text) { accumulated = chunk.text; paint(); }
+              if (chunk.model) assistantMsg.model = 'kilo · ' + chunk.model;
+            }
+          }
+        }
+        if (streamError) throw new Error(streamError);
+        if (!accumulated.trim()) accumulated = '*(No response received)*';
+        assistantMsg.content = accumulated; content.classList.remove('typing-cursor'); content.innerHTML = renderMarkdown(accumulated); saveSessionsToStorage();
+        if (activeTask) markTaskSeen();
+      } catch (err) {
+        if (err.name === 'AbortError') { content.classList.remove('typing-cursor'); content.innerHTML += '<br><em style="color: var(--text-dim);">[Stopped]</em>'; }
+        else { content.classList.remove('typing-cursor'); content.innerHTML = `<span style="color: var(--danger);">⚠️ Error: ${err.message}</span>`; }
+      } finally { isKiloGenerating = false; kiloAbortController = null; document.getElementById('send-btn').style.display = 'inline-flex'; document.getElementById('stop-btn').style.display = 'none'; }
+    }
+
+    // ---------- Task runner context ----------
+    const TASK_STATUS_LABEL = { todo: 'Todo', in_progress: 'In progress', review: 'Review', done: 'Done' };
+
+    function appToast(msg, isError) {
+      const el = document.createElement('div');
+      el.className = 'app-toast' + (isError ? ' error' : '');
+      el.textContent = msg;
+      document.body.appendChild(el);
+      setTimeout(() => el.remove(), 3200);
+    }
+
+    async function taskFetch(path, options = {}) {
+      const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...options });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || res.statusText);
+      return data;
+    }
+
+    async function loadTaskContext() {
+      const taskId = new URLSearchParams(location.search).get('task');
+      if (!taskId) return;
+      try {
+        activeTask = await taskFetch('/api/tasks/' + encodeURIComponent(taskId));
+      } catch (err) {
+        appToast('Task not found: ' + err.message, true);
+        return;
+      }
+      kiloAgent = activeTask.agent || 'master';
+      document.getElementById('kilo-agent-select').value = kiloAgent;
+      renderTaskBanner();
+      if (activeTask.kilo_session_id) {
+        currentKiloSessionId = activeTask.kilo_session_id;
+        try {
+          const hist = await taskFetch('/api/kilo/session/' + encodeURIComponent(currentKiloSessionId) + '/messages');
+          renderKiloMessages(Array.isArray(hist) ? hist : []);
+          markTaskSeen(Array.isArray(hist) ? hist : []);
+        } catch (err) {
+          currentKiloSessionId = null;
+          await patchTask({ kilo_session_id: null });
+          appToast('Previous Kilo session was not found; starting a fresh run.', true);
+          await startTaskRun();
+        }
+      } else {
+        await startTaskRun();
+      }
+    }
+
+    function renderTaskBanner() {
+      const banner = document.getElementById('task-banner');
+      if (!activeTask) { banner.classList.add('hidden'); return; }
+      banner.classList.remove('hidden');
+      document.getElementById('task-banner-title').textContent = activeTask.title;
+      const pill = document.getElementById('task-banner-status');
+      pill.className = 'task-pill ' + activeTask.status;
+      pill.textContent = TASK_STATUS_LABEL[activeTask.status] || activeTask.status;
+      document.getElementById('task-banner-meta').textContent =
+        (activeTask.agent || 'master') + ' · ' + (activeTask.assignee || 'unassigned') +
+        (activeTask.due_date ? ' · due ' + activeTask.due_date : '');
+    }
+
+    async function patchTask(patch) {
+      if (!activeTask) return null;
+      try {
+        activeTask = await taskFetch('/api/tasks/' + activeTask.id, { method: 'PATCH', body: JSON.stringify(patch) });
+        renderTaskBanner();
+        return activeTask;
+      } catch (err) { appToast(err.message, true); return null; }
+    }
+
+    async function setTaskStatus(status) {
+      await patchTask({ status });
+      if (status === 'done') appToast('Task marked done');
+    }
+
+    function dismissTaskBanner() {
+      activeTask = null;
+      document.getElementById('task-banner').classList.add('hidden');
+      const url = new URL(location.href);
+      url.searchParams.delete('task');
+      history.replaceState({}, '', url.pathname + (url.search ? url.search : ''));
+    }
+
+    async function buildSeedPrompt() {
+      let peerLines = [];
+      try {
+        const data = await taskFetch('/api/tasks?status=in_progress');
+        const others = (data.tasks || []).filter(t => t.id !== activeTask.id).slice(0, 3);
+        peerLines = others.map(t => '- ' + t.title + ' (' + (t.assignee || 'unassigned') + (t.due_date ? ', due ' + t.due_date : '') + ')');
+      } catch {}
+      return [
+        'Task: ' + activeTask.title,
+        activeTask.description ? 'Details: ' + activeTask.description : '',
+        'Role: ' + (activeTask.agent || 'master') + ' · Assignee: ' + (activeTask.assignee || 'unassigned') + (activeTask.due_date ? ' · Due: ' + activeTask.due_date : ''),
+        peerLines.length ? 'Other active work in the team right now:\n' + peerLines.join('\n') : '',
+        'Work directly in the current workspace. Use tools where useful, then finish with a short summary of what changed and any follow-ups.'
+      ].filter(Boolean).join('\n\n');
+    }
+
+    async function startTaskRun() {
+      if (!activeTask || taskAutoRan) return;
+      taskAutoRan = true;
+      try {
+        if (!currentKiloSessionId) {
+          const created = await taskFetch('/api/kilo/session', {
+            method: 'POST',
+            body: JSON.stringify({ title: activeTask.title.slice(0, 60), agent: activeTask.agent || 'master' })
+          });
+          currentKiloSessionId = created.sessionId;
+          loadKiloSessions();
+        }
+        const patch = { kilo_session_id: currentKiloSessionId };
+        if (activeTask.status === 'todo') patch.status = 'in_progress';
+        await patchTask(patch);
+        const seed = await buildSeedPrompt();
+        await sendKiloMessage(seed);
+      } catch (err) {
+        taskAutoRan = false;
+        appToast('Could not start task run: ' + err.message, true);
+      }
+    }
+
+    async function markTaskSeen(messages) {
+      if (!activeTask || !currentKiloSessionId) return;
+      try {
+        let list = messages;
+        if (!list) list = await taskFetch('/api/kilo/session/' + encodeURIComponent(currentKiloSessionId) + '/messages');
+        if (!Array.isArray(list)) return;
+        const last = [...list].reverse().find(m => (m.info || {}).role === 'assistant');
+        if (!last || !last.info?.id) return;
+        if (last.info.id === activeTask.last_message_id) return;
+        const created = last.info.time?.created;
+        await patchTask({
+          last_message_id: last.info.id,
+          last_run_at: created ? new Date(created).toISOString() : new Date().toISOString(),
+        });
+      } catch {}
+    }
 
     // ---------- Active Document ----------
     async function openDocument(filepath, type = null) {
@@ -457,7 +881,7 @@
           document.getElementById('text-editor').classList.remove('hidden');
           document.getElementById('text-editor').value = data.text;
         }
-      } catch (err) { alert('Could not open document: ' + err.message); }
+      } catch (err) { closeActiveDocument(); alert('Could not open document: ' + err.message); }
     }
 
     function pathExt(p) { return p.slice(p.lastIndexOf('.')).toLowerCase(); }
@@ -465,6 +889,7 @@
 
     function closeActiveDocument() {
       activeDocumentPath = null; activeDocumentType = null; activeDocumentText = '';
+      currentKiloSessionId = null; // Clear Kilo session when closing document
       document.getElementById('active-doc-title').textContent = 'No Document Loaded';
       document.getElementById('doc-empty-state').classList.remove('hidden');
       document.getElementById('pdf-frame').classList.add('hidden');
@@ -473,6 +898,7 @@
       document.getElementById('active-doc-indicator').style.display = 'none';
       document.getElementById('pdf-frame').src = '';
       document.getElementById('text-editor').value = '';
+      renderKiloSessionsList(); // Update Kilo session list selection
     }
 
     async function downloadActiveDocument() {
@@ -521,13 +947,29 @@
     function getFileIcon(filename, isDir) { if (isDir) return '📁'; const ext = filename.split('.').pop().toLowerCase(); const m = { js:'🟨', mjs:'🟨', html:'🌐', css:'🎨', json:'📦', md:'📝', txt:'📄', pdf:'📕', png:'🖼️', jpg:'🖼️', jpeg:'🖼️' }; return m[ext] || '📄'; }
 
     // ---------- File Uploads ----------
-    function handleFileUploads(files) {
-      const formData = new FormData();
-      for (const f of files) formData.append('file', f);
-      fetch('/api/document/upload', { method: 'POST', body: formData }).then(r => r.json()).then(d => {
-        if (d.error) alert('Upload error: ' + d.error);
-        else { loadDirectory(); if (d.filepath) openDocument(d.filepath); }
-      }).catch(e => alert('Upload failed: ' + e.message));
+    function handleDrop(ev) {
+      ev.preventDefault();
+      const dropped = ev.dataTransfer && ev.dataTransfer.files;
+      if (dropped && dropped.length) handleFileUploads(dropped);
+    }
+
+    async function handleFileUploads(files) {
+      const list = Array.from(files || []);
+      if (list.length === 0) return;
+      // The upload endpoint accepts one file per request, so send them one at a time
+      let last = null;
+      for (const f of list) {
+        const formData = new FormData();
+        formData.append('file', f);
+        try {
+          const res = await fetch('/api/document/upload', { method: 'POST', body: formData });
+          const d = await res.json();
+          if (d.error) { alert(`Upload error (${f.name}): ${d.error}`); continue; }
+          last = d;
+        } catch (e) { alert(`Upload failed (${f.name}): ${e.message}`); }
+      }
+      await loadDirectory();
+      if (last && last.filepath) await openDocument(last.filepath);
     }
 
     // ---------- File Modal ----------
@@ -575,6 +1017,9 @@
 
     // ---------- Chat ----------
     async function sendMessage() {
+      // Route to Kilo if a Kilo session is active or a Kilo model is selected
+      if (currentKiloSessionId || activeModel.startsWith('kilo/')) return sendKiloMessage();
+      
       if (isGenerating) return;
       const input = document.getElementById('chat-input'); const text = input.value.trim();
       if (!text && attachedFiles.length === 0) return;
@@ -626,7 +1071,7 @@
       } finally { isGenerating = false; abortController = null; document.getElementById('send-btn').style.display = 'inline-flex'; document.getElementById('stop-btn').style.display = 'none'; }
     }
 
-    function stopGeneration() { if (abortController) abortController.abort(); }
+    function stopGeneration() { if (abortController) abortController.abort(); if (kiloAbortController) kiloAbortController.abort(); }
 
     function renderMarkdown(text) {
       if (!window.marked) return text;
@@ -646,8 +1091,8 @@
 
     function copyCode(btn) { const code = btn.closest('pre').querySelector('code').innerText; navigator.clipboard.writeText(code).then(() => { btn.textContent = 'Copied!'; setTimeout(() => btn.textContent = 'Copy', 1500); }); }
     async function saveCodeBlock(btn) {
-      const pre = btn.closest('.code-header')?.nextElementSibling; if (!pre) return;
-      const code = pre.querySelector('code').innerText;
+      const codeEl = btn.closest('.code-header')?.nextElementSibling; if (!codeEl) return;
+      const code = (codeEl.querySelector('code') || codeEl).innerText;
       const name = prompt('Save as:', `output_${Date.now()}.txt`);
       if (!name) return;
       try {
@@ -705,7 +1150,20 @@
     function openNewFileModal() { document.getElementById('new-filename-input').value = ''; document.getElementById('new-file-initial-content').value = ''; document.getElementById('new-file-modal').classList.add('active'); }
     async function createNewFileSubmit() { const name = document.getElementById('new-filename-input').value.trim(); const content = document.getElementById('new-file-initial-content').value; if (!name) return; try { await fetch('/api/filesystem/write', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filepath: name, content }) }); closeModal('new-file-modal'); loadDirectory(); alert('Created: ' + name); } catch (e) { alert('Failed: ' + e.message); } }
     function closeModal(id) { document.getElementById(id).classList.remove('active'); }
-    function saveSettings() { alert('Settings saved!'); }
+    function saveSettings() {
+      try {
+        localStorage.setItem('computera_settings', JSON.stringify({ systemPrompt: document.getElementById('settings-system-prompt').value, model: activeModel }));
+      } catch {}
+      alert('Settings saved!');
+    }
+    function loadSettingsFromStorage() {
+      try {
+        const s = JSON.parse(localStorage.getItem('computera_settings') || 'null');
+        if (!s) return;
+        if (s.systemPrompt) document.getElementById('settings-system-prompt').value = s.systemPrompt;
+        if (s.model) activeModel = s.model;
+      } catch {}
+    }
 
     // PDF.js rendering
     let pdfDoc = null; let pdfPageNum = 1;

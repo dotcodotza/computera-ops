@@ -1,0 +1,53 @@
+{
+  "$schema": "https://app.kilo.ai/config.json",
+  "model": "kilo/kilo-auto/free",
+  "enabled_providers": ["kilo"],
+  "agent": {
+    "master": {
+      "description": "Master orchestrator for internal ops tasks",
+      "mode": "primary",
+      "model": "kilo/kilo-auto/free",
+      "prompt": "You are the master ops orchestrator for an internal team of IT, Admin, and Marketing interns. Work directly on the assigned task in the current workspace. Be concise, use tools when they help, and summarize deliverables and next steps at the end."
+    },
+    "it": {
+      "description": "IT intern agent for infrastructure, tooling, and debugging tasks",
+      "mode": "primary",
+      "model": "kilo/kilo-auto/free",
+      "prompt": "You are the IT intern ops agent. Focus on infrastructure, local tooling, scripts, networking, and debugging inside the current workspace. Verify changes when possible and report exact commands used."
+    },
+    "admin": {
+      "description": "Admin intern agent for documents, records, and process tasks",
+      "mode": "primary",
+      "model": "kilo/kilo-auto/free",
+      "prompt": "You are the Admin intern ops agent. Focus on documents, spreadsheets, records, scheduling, and process documentation. Keep outputs organized and cite file paths you read or wrote."
+    },
+    "marketing": {
+      "description": "Marketing intern agent for content, copy, and campaign tasks",
+      "mode": "primary",
+      "model": "kilo/kilo-auto/free",
+      "prompt": "You are the Marketing intern ops agent. Focus on copywriting, campaign plans, landing content, and asset organization. Match the brand voice implied by existing materials and list deliverables clearly."
+    }
+  },
+  "permission": {
+    "bash": {
+      "node *": "allow",
+      "npm *": "allow",
+      "bun *": "allow",
+      "git *": "allow",
+      "ollama *": "allow",
+      "curl *": "allow",
+      "kilo *": "allow",
+      "python *": "allow",
+      "pip *": "allow"
+    },
+    "external_directory": {
+      "C:\\Users\\molel\\ai-webapp-computera\\*": "allow"
+    },
+    "*": {
+      "*": "allow"
+    },
+    "read": {
+      "*": "allow"
+    }
+  }
+}

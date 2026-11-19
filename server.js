@@ -4,6 +4,8 @@ import fs from 'fs-extra';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createServer } from 'http';
+import os from 'os';
+import { randomUUID } from 'crypto';
 import { PDFDocument, rgb } from 'pdf-lib';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
@@ -11,6 +13,7 @@ const pdfParse = require('pdf-parse');
 const mammoth = require('mammoth');
 const multerModule = require('multer');
 const multer = multerModule.default || multerModule;
+import { listTasks, getTask, createTask, updateTask, deleteTask, TaskError } from './tasks-db.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,13 +21,14 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
+const KILO_URL = process.env.KILO_URL || 'http://127.0.0.1:7777';
 const MEMORY_DIR = path.join(__dirname, 'memory');
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
 
 // Safe filesystem roots
 const rawRoots = process.env.ALLOWED_FS_ROOTS 
   ? process.env.ALLOWED_FS_ROOTS.split(';') 
-  : [__dirname, process.env.USERPROFILE || 'C:\\Users\\SBTI Gaming 11', path.resolve(__dirname, '..')];
+  : [__dirname, process.env.USERPROFILE || os.homedir(), path.resolve(__dirname, '..')];
 
 const ALLOWED_FS_ROOTS = rawRoots.filter(Boolean).map(r => path.resolve(r).toLowerCase());
 
@@ -37,14 +41,23 @@ app.use('/uploads', express.static(UPLOADS_DIR));
 fs.ensureDirSync(MEMORY_DIR);
 fs.ensureDirSync(UPLOADS_DIR);
 
-// Multer for file uploads
-const upload = multer({ dest: UPLOADS_DIR });
+// Multer for file uploads - keeps the original extension so documents stay readable
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, UPLOADS_DIR),
+    filename: (req, file, cb) => {
+      const rawExt = path.extname(file.originalname || '').toLowerCase();
+      const safeExt = /^\.[a-z0-9]{1,10}$/.test(rawExt) ? rawExt : '';
+      cb(null, `${randomUUID()}${safeExt}`);
+    },
+  }),
+});
 
 // Normalize path & check if allowed
 function isPathAllowed(filepath) {
   try {
     const resolved = path.resolve(filepath).toLowerCase();
-    return ALLOWED_FS_ROOTS.some(root => resolved.startsWith(root) || root.startsWith(resolved));
+    return ALLOWED_FS_ROOTS.some(root => resolved === root || resolved.startsWith(root + path.sep));
   } catch {
     return false;
   }
@@ -63,8 +76,18 @@ async function extractDocumentText(filepath) {
   const ext = path.extname(filepath).toLowerCase();
   if (ext === '.pdf') {
     const dataBuffer = await fs.readFile(filepath);
-    const data = await pdfParse(dataBuffer);
-    return data.text;
+    // pdf-parse v1 exports a function, v2 exports a PDFParse class
+    if (typeof pdfParse === 'function') {
+      const data = await pdfParse(dataBuffer);
+      return data.text;
+    }
+    const parser = new pdfParse.PDFParse({ data: dataBuffer });
+    try {
+      const result = await parser.getText();
+      return result.text;
+    } finally {
+      if (typeof parser.destroy === 'function') await parser.destroy().catch(() => {});
+    }
   } else if (ext === '.docx') {
     const result = await mammoth.extractRawText({ path: filepath });
     return result.value;
@@ -282,7 +305,7 @@ app.get('/api/models', async (req, res) => {
 
 // Workspace info
 app.get('/api/filesystem/workspace', (req, res) => {
-  res.json({ cwd: __dirname, home: process.env.USERPROFILE || 'C:\\Users\\SBTI Gaming 11', allowedRoots: ALLOWED_FS_ROOTS });
+  res.json({ cwd: __dirname, home: process.env.USERPROFILE || os.homedir(), allowedRoots: ALLOWED_FS_ROOTS });
 });
 
 // Read file
@@ -574,7 +597,286 @@ CRITICAL INSTRUCTIONS - READ CAREFULLY:
       }
       res.json(data);
     }
-  } catch (err) { console.error('Chat error:', err); res.status(500).json({ error: err.message }); }
+} catch (err) { console.error('Chat error:', err); res.status(500).json({ error: err.message }); }
+  });
+
+// -------------------------------------------------------------
+// Kilo API Proxy Endpoints
+// -------------------------------------------------------------
+
+// Kilo health check - try to reach the server
+app.get('/api/kilo/health', async (req, res) => {
+  try {
+    const resp = await fetch(`${KILO_URL}/global/health`, { signal: AbortSignal.timeout(3000) });
+    if (resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      res.json({ status: 'ok', kiloStatus: 'online', healthy: data.healthy !== false });
+    } else {
+      res.json({ status: 'degraded', kiloStatus: 'unhealthy', error: 'Kilo server responded with error' });
+    }
+  } catch (err) {
+    console.error('Kilo health check exception:', err.message);
+    res.status(502).json({ error: `Cannot reach Kilo at ${KILO_URL}: ${err.message}`, kiloStatus: 'offline' });
+  }
+});
+
+// List Kilo Gateway models available for chat
+app.get('/api/kilo/models', async (req, res) => {
+  try {
+    const resp = await fetch(`${KILO_URL}/api/model`, { signal: AbortSignal.timeout(8000) });
+    if (!resp.ok) return res.json({ models: [] });
+    const data = await resp.json();
+    const models = (data.data || [])
+      .filter(m => m.providerID === 'kilo')
+      .map(m => ({ id: m.id, name: m.name || m.id, free: /:free$|-free$/.test(m.id) || m.id.startsWith('kilo-auto/') }));
+    models.sort((a, b) => {
+      if (a.id.startsWith('kilo-auto/') !== b.id.startsWith('kilo-auto/')) return a.id.startsWith('kilo-auto/') ? -1 : 1;
+      if (a.free !== b.free) return a.free ? -1 : 1;
+      return a.id.localeCompare(b.id);
+    });
+    res.json({ models: models.filter(m => m.free).slice(0, 30) });
+  } catch (err) { res.json({ models: [] }); }
+});
+
+const KILO_DIRECTORY = __dirname;
+
+function kiloModelRef(model) {
+  if (!model || typeof model !== 'string') return undefined;
+  const modelID = model.startsWith('kilo/') ? model.slice(5) : model;
+  if (!modelID) return undefined;
+  return { providerID: 'kilo', modelID };
+}
+
+function kiloHeaders() {
+  return { 'Content-Type': 'application/json', 'x-kilo-directory': KILO_DIRECTORY };
+}
+
+function kiloDirectoryQuery() {
+  return `directory=${encodeURIComponent(KILO_DIRECTORY)}`;
+}
+
+function messageText(msg) {
+  if (!msg) return '';
+  const parts = msg.parts || msg.content || [];
+  return parts.filter(p => p && p.type === 'text' && typeof p.text === 'string').map(p => p.text).join('');
+}
+
+// Create Kilo session
+app.post('/api/kilo/session', async (req, res) => {
+  try {
+    const { title, agent = 'code', model } = req.body;
+    const body = { title: title || 'Computera Task', agent };
+    if (model) body.model = model;
+    const resp = await fetch(`${KILO_URL}/session`, {
+      method: 'POST',
+      headers: kiloHeaders(),
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      const errText = await resp.text();
+      return res.status(resp.status).json({ error: `Kilo error (${resp.status}): ${errText}` });
+    }
+    const session = await resp.json();
+    res.json({ sessionId: session.id, title: session.title, agent: session.agent, id: session.id });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// List Kilo sessions
+app.get('/api/kilo/sessions', async (req, res) => {
+  try {
+    const resp = await fetch(`${KILO_URL}/session?${kiloDirectoryQuery()}`, { signal: AbortSignal.timeout(5000) });
+    if (!resp.ok) return res.json({ sessions: [] });
+    const data = await resp.json();
+    res.json({ sessions: Array.isArray(data) ? data.slice(0, 50) : [] });
+  } catch (err) {
+    res.json({ sessions: [] });
+  }
+});
+
+// Get Kilo session state
+app.get('/api/kilo/session/:sessionId', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const resp = await fetch(`${KILO_URL}/session/${sessionId}?${kiloDirectoryQuery()}`, { signal: AbortSignal.timeout(5000) });
+    if (!resp.ok) return res.status(resp.status).json({ error: 'Kilo session not found' });
+    const data = await resp.json();
+    res.json(data);
+  } catch (err) { res.status(502).json({ error: `Cannot reach Kilo: ${err.message}` }); }
+});
+
+// Get Kilo session messages (v1: [{ info, parts }])
+app.get('/api/kilo/session/:sessionId/messages', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const resp = await fetch(`${KILO_URL}/session/${sessionId}/message?${kiloDirectoryQuery()}`, { signal: AbortSignal.timeout(5000) });
+    if (!resp.ok) return res.status(resp.status).json({ error: 'Failed to fetch Kilo messages' });
+    const data = await resp.json();
+    res.json(data);
+  } catch (err) { res.status(502).json({ error: `Cannot reach Kilo: ${err.message}` }); }
+});
+
+// Send prompt to Kilo session (blocking)
+app.post('/api/kilo/session/:sessionId/prompt', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const prompt = typeof req.body.prompt === 'string' ? req.body.prompt : req.body.prompt?.text;
+    if (!prompt) return res.status(400).json({ error: 'prompt required' });
+
+    const resp = await fetch(`${KILO_URL}/session/${sessionId}/message`, {
+      method: 'POST',
+      headers: kiloHeaders(),
+      body: JSON.stringify({ parts: [{ type: 'text', text: prompt }], model: kiloModelRef(req.body.model), agent: req.body.agent }),
+    });
+    if (!resp.ok) {
+      const errText = await resp.text();
+      return res.status(resp.status).json({ error: `Kilo error (${resp.status}): ${errText}` });
+    }
+    const message = await resp.json();
+    res.json({ success: true, sessionId, model: message.info?.modelID, provider: message.info?.providerID, text: messageText(message) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Send prompt to Kilo session (streams part deltas as newline-delimited JSON)
+app.post('/api/kilo/session/:sessionId/prompt_stream', async (req, res) => {
+  const { sessionId } = req.params;
+  const prompt = typeof req.body.prompt === 'string' ? req.body.prompt : req.body.prompt?.text;
+  if (!prompt) return res.status(400).json({ error: 'prompt required' });
+
+  res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  const eventAbort = new AbortController();
+  let closed = false;
+  res.on('close', () => { if (!res.writableEnded) { closed = true; } eventAbort.abort(); });
+
+  const forwardEvents = (async () => {
+    try {
+      const evResp = await fetch(`${KILO_URL}/event?${kiloDirectoryQuery()}`, {
+        headers: { Accept: 'text/event-stream' },
+        signal: eventAbort.signal,
+      });
+      if (!evResp.ok || !evResp.body) return;
+      const decoder = new TextDecoder();
+      let buffer = '';
+      const partTypes = new Map();
+      for await (const chunk of evResp.body) {
+        buffer += decoder.decode(chunk, { stream: true });
+        const frames = buffer.split('\n\n');
+        buffer = frames.pop();
+        for (const frame of frames) {
+          for (const line of frame.split('\n')) {
+            if (!line.startsWith('data:')) continue;
+            let evt;
+            try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
+            const props = evt?.properties || {};
+            if (props.sessionID !== sessionId) continue;
+            if (evt.type === 'message.part.updated' && props.part?.id) {
+              partTypes.set(props.part.id, props.part.type);
+            }
+            if (evt.type === 'message.part.delta' && props.field === 'text' && props.delta) {
+              if (partTypes.get(props.partID) !== 'text') continue;
+              if (!closed) res.write(JSON.stringify({ delta: props.delta }) + '\n');
+            }
+          }
+        }
+      }
+    } catch (err) {
+      if (!closed) console.warn('Kilo event stream ended:', err.message);
+    }
+  })();
+
+  try {
+    const resp = await fetch(`${KILO_URL}/session/${sessionId}/message`, {
+      method: 'POST',
+      headers: kiloHeaders(),
+      body: JSON.stringify({ parts: [{ type: 'text', text: prompt }], model: kiloModelRef(req.body.model), agent: req.body.agent }),
+    });
+    if (!resp.ok) {
+      const errText = await resp.text();
+      if (!closed) res.write(JSON.stringify({ error: `Kilo error (${resp.status}): ${errText}` }) + '\n');
+    } else {
+      const message = await resp.json();
+      const text = messageText(message);
+      const failed = message.info?.error;
+      if (failed && !text) {
+        if (!closed) res.write(JSON.stringify({ error: failed.message || JSON.stringify(failed) }) + '\n');
+      } else if (!closed) {
+        res.write(JSON.stringify({
+          done: true,
+          text,
+          model: message.info?.modelID,
+          provider: message.info?.providerID,
+        }) + '\n');
+      }
+    }
+  } catch (err) {
+    if (!closed) res.write(JSON.stringify({ error: err.message }) + '\n');
+  } finally {
+    eventAbort.abort();
+    if (!closed) res.end();
+  }
+});
+
+// Delete Kilo session
+app.delete('/api/kilo/session/:sessionId', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const resp = await fetch(`${KILO_URL}/session/${sessionId}?${kiloDirectoryQuery()}`, {
+      method: 'DELETE',
+      headers: kiloHeaders(),
+    });
+    if (!resp.ok) return res.status(resp.status).json({ error: 'Failed to delete Kilo session' });
+    res.json({ success: true, sessionId });
+  } catch (err) { res.status(502).json({ error: `Cannot reach Kilo: ${err.message}` }); }
+});
+
+// -------------------------------------------------------------
+// Task Manager API (SQLite)
+// -------------------------------------------------------------
+
+function handleTaskError(res, err) {
+  if (err instanceof TaskError) return res.status(err.status).json({ error: err.message });
+  console.error('Task API error:', err);
+  res.status(500).json({ error: err.message });
+}
+
+app.get('/dashboard', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
+});
+
+app.get('/api/tasks', (req, res) => {
+  try {
+    res.json({ tasks: listTasks({
+      status: req.query.status,
+      assignee: req.query.assignee,
+      agent: req.query.agent,
+      from: req.query.from,
+      to: req.query.to,
+      q: req.query.q,
+    }) });
+  } catch (err) { handleTaskError(res, err); }
+});
+
+app.post('/api/tasks', (req, res) => {
+  try { res.status(201).json(createTask(req.body || {})); } catch (err) { handleTaskError(res, err); }
+});
+
+app.get('/api/tasks/:id', (req, res) => {
+  try {
+    const task = getTask(req.params.id);
+    if (!task) return res.status(404).json({ error: 'task not found' });
+    res.json(task);
+  } catch (err) { handleTaskError(res, err); }
+});
+
+app.patch('/api/tasks/:id', (req, res) => {
+  try { res.json(updateTask(req.params.id, req.body || {})); } catch (err) { handleTaskError(res, err); }
+});
+
+app.delete('/api/tasks/:id', (req, res) => {
+  try { deleteTask(req.params.id); res.json({ success: true }); } catch (err) { handleTaskError(res, err); }
 });
 
 // Tool execution endpoint
@@ -590,8 +892,9 @@ app.post('/api/tools/execute', async (req, res) => {
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 
 const server = createServer(app);
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Web app running on http://localhost:${PORT}`);
+server.listen(PORT, '127.0.0.1', () => {
+  const { port } = server.address();
+  console.log(`Web app running on http://127.0.0.1:${port}`);
   console.log(`Ollama: ${OLLAMA_URL}`);
   console.log(`Workspace root: ${__dirname}`);
   console.log(`Uploads dir: ${UPLOADS_DIR}`);

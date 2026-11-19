@@ -7,3 +7,15 @@ yarn-error.log*
 Thumbs.db
 .env
 .env.local
+
+# Runtime artifacts
+uploads/
+test.pdf
+memory/*.json
+data/
+
+# Local workspace artifacts (may contain PII)
+marketing/
+interviews/
+test.html
+.kilo/plans/

@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ops Dashboard</title>
+  <style>
+    :root {
+      --bg-dark: #0f1117; --bg-surface: #161922; --bg-surface-hover: #1e2230;
+      --bg-panel: #1a1e2b; --border: #282e3f; --border-focus: #4f46e5;
+      --text-main: #f1f5f9; --text-muted: #94a3b8; --text-dim: #64748b;
+      --accent: #6366f1; --accent-hover: #4f46e5; --accent-glow: rgba(99, 102, 241, 0.25);
+      --success: #10b981; --warning: #f59e0b; --danger: #ef4444;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif; background: var(--bg-dark); color: var(--text-main); min-height: 100vh; display: flex; flex-direction: column; }
+    button { font-family: inherit; cursor: pointer; border: none; background: none; color: inherit; }
+    a { color: var(--accent); text-decoration: none; }
+    input, select, textarea { font-family: inherit; font-size: 13px; background: var(--bg-panel); border: 1px solid var(--border); color: var(--text-main); border-radius: 6px; padding: 7px 10px; outline: none; }
+    input:focus, select:focus, textarea:focus { border-color: var(--border-focus); }
+
+    header { height: 56px; border-bottom: 1px solid var(--border); background: var(--bg-surface); display: flex; align-items: center; justify-content: space-between; padding: 0 18px; flex-shrink: 0; }
+    .brand { display: flex; align-items: center; gap: 10px; }
+    .logo { width: 30px; height: 30px; border-radius: 8px; background: linear-gradient(135deg, var(--accent), #a855f7); display: flex; align-items: center; justify-content: center; font-weight: 700; color: #fff; box-shadow: 0 0 12px var(--accent-glow); }
+    .brand h1 { font-size: 15px; letter-spacing: -0.3px; }
+    .brand span { font-size: 11px; color: var(--text-dim); display: block; }
+    .actions { display: flex; align-items: center; gap: 10px; }
+    .badge { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 4px 10px; border-radius: 20px; background: rgba(16,185,129,0.1); color: var(--success); border: 1px solid rgba(16,185,129,0.2); }
+    .badge.offline { background: rgba(239,68,68,0.1); color: var(--danger); border-color: rgba(239,68,68,0.2); }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+    .btn { padding: 7px 12px; border-radius: 6px; font-size: 13px; border: 1px solid var(--border); background: var(--bg-panel); color: var(--text-main); }
+    .btn:hover { background: var(--bg-surface-hover); }
+    .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn-primary:hover { background: var(--accent-hover); }
+    .btn-danger { background: rgba(239,68,68,0.12); border-color: rgba(239,68,68,0.35); color: #fca5a5; }
+    .btn-sm { padding: 4px 9px; font-size: 12px; }
+
+    main { flex: 1; overflow: auto; padding: 18px; }
+    .tabs { display: flex; gap: 6px; margin-bottom: 16px; }
+    .tab { padding: 8px 16px; border-radius: 8px; font-size: 13px; color: var(--text-muted); border: 1px solid transparent; }
+    .tab.active { background: var(--bg-panel); border-color: var(--border); color: var(--text-main); }
+    .panel { background: var(--bg-surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+    .hidden { display: none !important; }
+
+    /* Calendar */
+    .cal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+    .cal-title { font-size: 16px; font-weight: 600; }
+    .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+    .cal-dow { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim); text-align: center; padding: 4px 0; }
+    .cal-day { min-height: 104px; border: 1px solid var(--border); border-radius: 8px; padding: 6px; background: var(--bg-panel); cursor: pointer; display: flex; flex-direction: column; gap: 4px; }
+    .cal-day:hover { border-color: var(--border-focus); }
+    .cal-day.out { opacity: 0.45; }
+    .cal-day.today { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent-glow); }
+    .cal-num { font-size: 12px; color: var(--text-muted); }
+    .cal-day.today .cal-num { color: var(--accent); font-weight: 700; }
+    .chip { font-size: 11px; padding: 2px 6px; border-radius: 4px; background: var(--bg-surface-hover); color: var(--text-main); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-left: 3px solid var(--text-dim); }
+    .chip.high { border-left-color: var(--danger); }
+    .chip.medium { border-left-color: var(--warning); }
+    .chip.low { border-left-color: var(--success); }
+    .chip.done { opacity: 0.55; text-decoration: line-through; }
+    .more { font-size: 11px; color: var(--text-dim); }
+
+    /* Task list */
+    .filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+    .task-table { width: 100%; border-collapse: collapse; }
+    .task-table th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim); padding: 8px; border-bottom: 1px solid var(--border); }
+    .task-table td { padding: 10px 8px; border-bottom: 1px solid var(--border); font-size: 13px; vertical-align: middle; }
+    .task-table tr:hover td { background: var(--bg-panel); }
+    .task-title { font-weight: 600; cursor: pointer; }
+    .task-title:hover { color: var(--accent); }
+    .muted { color: var(--text-muted); font-size: 12px; }
+    .pill { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 20px; border: 1px solid var(--border); color: var(--text-muted); }
+    .pill.todo { color: var(--text-muted); }
+    .pill.in_progress { color: #93c5fd; border-color: rgba(147,197,253,0.35); background: rgba(59,130,246,0.12); }
+    .pill.review { color: var(--warning); border-color: rgba(245,158,11,0.35); background: rgba(245,158,11,0.1); }
+    .pill.done { color: var(--success); border-color: rgba(16,185,129,0.35); background: rgba(16,185,129,0.1); }
+    .pill.high { color: var(--danger); border-color: rgba(239,68,68,0.35); background: rgba(239,68,68,0.1); }
+    .pill.medium { color: var(--warning); }
+    .pill.low { color: var(--success); }
+    .new-output { font-size: 11px; color: var(--accent); background: var(--accent-glow); padding: 2px 8px; border-radius: 20px; white-space: nowrap; }
+    .row-actions { display: flex; gap: 6px; justify-content: flex-end; }
+    .empty { text-align: center; color: var(--text-dim); padding: 40px 0; font-size: 13px; }
+
+    /* Modal + drawer */
+    .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.55); display: flex; justify-content: flex-end; z-index: 40; }
+    .overlay.center { align-items: center; justify-content: center; }
+    .drawer { width: 460px; max-width: 100%; background: var(--bg-surface); border-left: 1px solid var(--border); height: 100%; display: flex; flex-direction: column; }
+    .drawer-head, .modal-head { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+    .drawer-body, .modal-body { padding: 16px 18px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 12px; }
+    .drawer-foot, .modal-foot { padding: 12px 18px; border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end; }
+    .modal { width: 520px; max-width: 92vw; background: var(--bg-surface); border: 1px solid var(--border); border-radius: 12px; display: flex; flex-direction: column; max-height: 90vh; }
+    .field label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim); margin-bottom: 5px; }
+    .field input, .field select, .field textarea { width: 100%; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .kv { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; color: var(--text-muted); }
+    .meta-box { background: var(--bg-panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+    .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--bg-panel); border: 1px solid var(--border); padding: 10px 16px; border-radius: 8px; font-size: 13px; z-index: 60; }
+    .toast.error { border-color: rgba(239,68,68,0.5); color: #fca5a5; }
+    code { font-size: 11px; color: var(--text-muted); word-break: break-all; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="logo">C</div>
+      <div>
+        <h1>Ops Dashboard</h1>
+        <span>Calendar &middot; Tasks &middot; Kilo runner</span>
+      </div>
+    </div>
+    <div class="actions">
+      <div class="badge" id="kilo-status"><div class="dot"></div><span id="kilo-status-text">Checking Kilo...</span></div>
+      <button class="btn" onclick="location.href='/'">Open Chat</button>
+      <button class="btn btn-primary" onclick="openCreate()">+ New Task</button>
+    </div>
+  </header>
+
+  <main>
+    <div class="tabs">
+      <button class="tab active" id="tab-cal" onclick="switchTab('calendar')">Calendar</button>
+      <button class="tab" id="tab-tasks" onclick="switchTab('tasks')">Tasks</button>
+      <span class="muted" id="task-count" style="margin-left:auto;align-self:center;"></span>
+    </div>
+
+    <section class="panel" id="view-calendar">
+      <div class="cal-head">
+        <div class="cal-title" id="cal-title"></div>
+        <div class="actions">
+          <button class="btn btn-sm" onclick="shiftMonth(-1)">&#8592;</button>
+          <button class="btn btn-sm" onclick="goToday()">Today</button>
+          <button class="btn btn-sm" onclick="shiftMonth(1)">&#8594;</button>
+        </div>
+      </div>
+      <div class="cal-grid" id="cal-grid"></div>
+    </section>
+
+    <section class="panel hidden" id="view-tasks">
+      <div class="filters">
+        <select id="f-status" onchange="renderTasks()">
+          <option value="">All statuses</option>
+          <option value="todo">Todo</option>
+          <option value="in_progress">In progress</option>
+          <option value="review">Review</option>
+          <option value="done">Done</option>
+        </select>
+        <select id="f-priority" onchange="renderTasks()">
+          <option value="">All priorities</option>
+          <option value="high">High</option>
+          <option value="medium">Medium</option>
+          <option value="low">Low</option>
+        </select>
+        <select id="f-agent" onchange="renderTasks()">
+          <option value="">All agents</option>
+          <option value="master">Master</option>
+          <option value="it">IT</option>
+          <option value="admin">Admin</option>
+          <option value="marketing">Marketing</option>
+        </select>
+        <input id="f-search" placeholder="Search title, assignee, tags..." oninput="renderTasks()" style="flex:1;min-width:180px;">
+      </div>
+      <table class="task-table">
+        <thead>
+          <tr><th>Task</th><th>Owner</th><th>Due</th><th>Status</th><th>Priority</th><th></th></tr>
+        </thead>
+        <tbody id="task-rows"></tbody>
+      </table>
+      <div class="empty hidden" id="tasks-empty">No tasks match these filters.</div>
+    </section>
+  </main>
+
+  <div id="overlay-root"></div>
+
+<script>
+  const STATUSES = ['todo', 'in_progress', 'review', 'done'];
+  const STATUS_LABEL = { todo: 'Todo', in_progress: 'In progress', review: 'Review', done: 'Done' };
+  const AGENTS = ['master', 'it', 'admin', 'marketing'];
+  const AGENT_LABEL = { master: 'Master', it: 'IT', admin: 'Admin', marketing: 'Marketing' };
+  const PRIORITIES = ['high', 'medium', 'low'];
+
+  let tasks = [];
+  let view = 'calendar';
+  let cursor = new Date();
+  let newOutput = {};
+  let selectedId = null;
+
+  function toast(msg, isError) {
+    const el = document.createElement('div');
+    el.className = 'toast' + (isError ? ' error' : '');
+    el.textContent = msg;
+    document.body.appendChild(el);
+    setTimeout(() => el.remove(), 3200);
+  }
+
+  async function api(path, options = {}) {
+    const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...options });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    return data;
+  }
+
+  function ymd(date) {
+    return date.getFullYear() + '-' + String(date.getMonth() + 1).padStart(2, '0') + '-' + String(date.getDate()).padStart(2, '0');
+  }
+
+  async function loadTasks() {
+    try {
+      const data = await api('/api/tasks');
+      tasks = data.tasks || [];
+      document.getElementById('task-count').textContent = tasks.length + ' task' + (tasks.length === 1 ? '' : 's');
+      renderCalendar();
+      renderTasks();
+      checkNewOutput();
+    } catch (err) { toast('Failed to load tasks: ' + err.message, true); }
+  }
+
+  async function checkNewOutput() {
+    newOutput = {};
+    const candidates = tasks.filter(t => t.kilo_session_id).slice(0, 25);
+    await Promise.all(candidates.map(async (t) => {
+      try {
+        const messages = await api('/api/kilo/session/' + encodeURIComponent(t.kilo_session_id) + '/messages');
+        const list = Array.isArray(messages) ? messages : [];
+        const lastAssistant = [...list].reverse().find(m => (m.info || {}).role === 'assistant');
+        const lastId = lastAssistant ? lastAssistant.info.id : null;
+        if (lastId && lastId !== t.last_message_id) newOutput[t.id] = true;
+      } catch {}
+    }));
+    renderTasks();
+  }
+
+  async function checkKilo() {
+    try {
+      const data = await api('/api/kilo/health');
+      const online = data.kiloStatus === 'online' || data.healthy === true;
+      document.getElementById('kilo-status').classList.toggle('offline', !online);
+      document.getElementById('kilo-status-text').textContent = online ? 'Kilo Online' : 'Kilo Offline';
+    } catch {
+      document.getElementById('kilo-status').classList.add('offline');
+      document.getElementById('kilo-status-text').textContent = 'Kilo Unreachable';
+    }
+  }
+
+  function switchTab(tab) {
+    view = tab;
+    document.getElementById('view-calendar').classList.toggle('hidden', tab !== 'calendar');
+    document.getElementById('view-tasks').classList.toggle('hidden', tab !== 'tasks');
+    document.getElementById('tab-cal').classList.toggle('active', tab === 'calendar');
+    document.getElementById('tab-tasks').classList.toggle('active', tab === 'tasks');
+  }
+
+  function shiftMonth(delta) {
+    cursor = new Date(cursor.getFullYear(), cursor.getMonth() + delta, 1);
+    renderCalendar();
+  }
+
+  function goToday() {
+    cursor = new Date();
+    renderCalendar();
+  }
+
+  function renderCalendar() {
+    const grid = document.getElementById('cal-grid');
+    const title = document.getElementById('cal-title');
+    const year = cursor.getFullYear();
+    const month = cursor.getMonth();
+    title.textContent = cursor.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+
+    const first = new Date(year, month, 1);
+    const startOffset = (first.getDay() + 6) % 7;
+    const start = new Date(year, month, 1 - startOffset);
+    const today = ymd(new Date());
+
+    const byDate = {};
+    tasks.forEach(t => {
+      if (!t.due_date) return;
+      (byDate[t.due_date] = byDate[t.due_date] || []).push(t);
+    });
+
+    grid.innerHTML = '';
+    ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].forEach(d => {
+      const el = document.createElement('div');
+      el.className = 'cal-dow';
+      el.textContent = d;
+      grid.appendChild(el);
+    });
+
+    for (let i = 0; i < 42; i++) {
+      const day = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
+      const key = ymd(day);
+      const cell = document.createElement('div');
+      cell.className = 'cal-day' + (day.getMonth() !== month ? ' out' : '') + (key === today ? ' today' : '');
+      cell.onclick = () => openCreate(key);
+
+      const num = document.createElement('div');
+      num.className = 'cal-num';
+      num.textContent = day.getDate();
+      cell.appendChild(num);
+
+      (byDate[key] || []).slice(0, 3).forEach(t => {
+        const chip = document.createElement('div');
+        chip.className = 'chip ' + (t.priority || 'medium') + (t.status === 'done' ? ' done' : '');
+        chip.textContent = t.title;
+        chip.title = t.title + ' — ' + STATUS_LABEL[t.status];
+        chip.onclick = (ev) => { ev.stopPropagation(); openTask(t.id); };
+        cell.appendChild(chip);
+      });
+      const extra = (byDate[key] || []).length - 3;
+      if (extra > 0) {
+        const more = document.createElement('div');
+        more.className = 'more';
+        more.textContent = '+' + extra + ' more';
+        cell.appendChild(more);
+      }
+      grid.appendChild(cell);
+    }
+  }
+
+  function renderTasks() {
+    const status = document.getElementById('f-status').value;
+    const priority = document.getElementById('f-priority').value;
+    const agent = document.getElementById('f-agent').value;
+    const q = document.getElementById('f-search').value.trim().toLowerCase();
+
+    const filtered = tasks.filter(t => {
+      if (status && t.status !== status) return false;
+      if (priority && t.priority !== priority) return false;
+      if (agent && t.agent !== agent) return false;
+      if (q) {
+        const hay = [t.title, t.description, t.assignee, (t.tags || []).join(' ')].join(' ').toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+
+    const rows = document.getElementById('task-rows');
+    rows.innerHTML = '';
+    document.getElementById('tasks-empty').classList.toggle('hidden', filtered.length > 0);
+
+    filtered.forEach(t => {
+      const tr = document.createElement('tr');
+
+      const tdTitle = document.createElement('td');
+      const title = document.createElement('div');
+      title.className = 'task-title';
+      title.textContent = t.title;
+      title.onclick = () => openTask(t.id);
+      tdTitle.appendChild(title);
+      if (t.tags && t.tags.length) {
+        const tags = document.createElement('div');
+        tags.className = 'muted';
+        tags.textContent = t.tags.map(x => '#' + x).join(' ');
+        tdTitle.appendChild(tags);
+      }
+      if (newOutput[t.id]) {
+        const badge = document.createElement('span');
+        badge.className = 'new-output';
+        badge.textContent = 'New output available';
+        badge.style.marginLeft = '8px';
+        tdTitle.appendChild(badge);
+      }
+      tr.appendChild(tdTitle);
+
+      const tdOwner = document.createElement('td');
+      tdOwner.innerHTML = '<div>' + escapeHtml(t.assignee || '—') + '</div><div class="muted">' + AGENT_LABEL[t.agent] + '</div>';
+      tr.appendChild(tdOwner);
+
+      const tdDue = document.createElement('td');
+      tdDue.className = 'muted';
+      tdDue.textContent = t.due_date || '—';
+      tr.appendChild(tdDue);
+
+      const tdStatus = document.createElement('td');
+      const sel = document.createElement('select');
+      sel.className = 'pill ' + t.status;
+      STATUSES.forEach(s => {
+        const opt = new Option(STATUS_LABEL[s], s);
+        if (s === t.status) opt.selected = true;
+        sel.add(opt);
+      });
+      sel.onchange = async () => {
+        try { await api('/api/tasks/' + t.id, { method: 'PATCH', body: JSON.stringify({ status: sel.value }) }); loadTasks(); }
+        catch (err) { toast(err.message, true); sel.value = t.status; }
+      };
+      tdStatus.appendChild(sel);
+      tr.appendChild(tdStatus);
+
+      const tdPriority = document.createElement('td');
+      const pill = document.createElement('span');
+      pill.className = 'pill ' + t.priority;
+      pill.textContent = t.priority;
+      tdPriority.appendChild(pill);
+      tr.appendChild(tdPriority);
+
+      const tdActions = document.createElement('td');
+      const actions = document.createElement('div');
+      actions.className = 'row-actions';
+      const run = document.createElement('button');
+      run.className = 'btn btn-sm btn-primary';
+      run.textContent = t.kilo_session_id ? 'Open run' : 'Run';
+      run.onclick = () => runTask(t.id);
+      actions.appendChild(run);
+      tdActions.appendChild(actions);
+      tr.appendChild(tdActions);
+
+      rows.appendChild(tr);
+    });
+  }
+
+  function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  function runTask(id) {
+    const task = tasks.find(t => t.id === id);
+    if (!task) return;
+    window.open('/?task=' + encodeURIComponent(id), '_blank');
+  }
+
+  function field(label, inputHtml) {
+    return '<div class="field"><label>' + label + '</label>' + inputHtml + '</div>';
+  }
+
+  function taskForm(task) {
+    const t = task || {};
+    const isNew = !t.id;
+    const model = {
+      title: t.title || '',
+      description: t.description || '',
+      status: t.status || 'todo',
+      priority: t.priority || 'medium',
+      agent: t.agent || 'master',
+      assignee: t.assignee || '',
+      due_date: t.due_date || ymd(new Date()),
+      tags: t.tags || [],
+    };
+    return '' +
+      field('Title', '<input id="fm-title" value="' + attr(model.title) + '" placeholder="What needs to happen?">') +
+      field('Description', '<textarea id="fm-desc" rows="5" placeholder="Context, acceptance criteria, links...">' + escapeHtml(model.description) + '</textarea>') +
+      '<div class="grid2">' +
+        field('Status', selectHtml('fm-status', STATUSES, model.status, STATUS_LABEL)) +
+        field('Priority', selectHtml('fm-priority', PRIORITIES, model.priority, { high: 'High', medium: 'Medium', low: 'Low' })) +
+      '</div>' +
+      '<div class="grid2">' +
+        field('Agent', selectHtml('fm-agent', AGENTS, model.agent, AGENT_LABEL)) +
+        field('Assignee', '<input id="fm-assignee" value="' + attr(model.assignee) + '" placeholder="Name or initials">') +
+      '</div>' +
+      '<div class="grid2">' +
+        field('Due date', '<input id="fm-due" type="date" value="' + attr(model.due_date) + '">') +
+        field('Tags', '<input id="fm-tags" value="' + attr(model.tags.join(', ')) + '" placeholder="ops, q4">') +
+      '</div>' +
+      (isNew ? '' : '<div class="meta-box"><div class="kv"><span>Kilo session</span><code>' + escapeHtml(t.kilo_session_id || 'not started') + '</code></div><div class="kv"><span>Last run</span><span>' + escapeHtml(t.last_run_at || '—') + '</span></div></div>');
+  }
+
+  function attr(value) { return escapeHtml(String(value == null ? '' : value)).replace(/"/g, '&quot;'); }
+
+  function selectHtml(id, values, selected, labels) {
+    return '<select id="' + id + '">' + values.map(v =>
+      '<option value="' + v + '"' + (v === selected ? ' selected' : '') + '>' + labels[v] + '</option>'
+    ).join('') + '</select>';
+  }
+
+  function readForm() {
+    return {
+      title: document.getElementById('fm-title').value,
+      description: document.getElementById('fm-desc').value,
+      status: document.getElementById('fm-status').value,
+      priority: document.getElementById('fm-priority').value,
+      agent: document.getElementById('fm-agent').value,
+      assignee: document.getElementById('fm-assignee').value,
+      due_date: document.getElementById('fm-due').value || null,
+      tags: document.getElementById('fm-tags').value,
+    };
+  }
+
+  function openCreate(dateStr) {
+    selectedId = null;
+    document.getElementById('overlay-root').innerHTML =
+      '<div class="overlay center"><div class="modal"><div class="modal-head"><strong>New Task</strong><button class="btn btn-sm" onclick="closeOverlay()">Close</button></div>' +
+      '<div class="modal-body">' + taskForm({ due_date: dateStr || ymd(new Date()) }) + '</div>' +
+      '<div class="modal-foot"><button class="btn" onclick="closeOverlay()">Cancel</button><button class="btn btn-primary" onclick="saveTask()">Create Task</button></div></div></div>';
+    document.getElementById('fm-title').focus();
+  }
+
+  function openTask(id) {
+    const t = tasks.find(x => x.id === id);
+    if (!t) return;
+    selectedId = id;
+    document.getElementById('overlay-root').innerHTML =
+      '<div class="overlay"><div class="drawer"><div class="drawer-head"><strong>Task</strong><button class="btn btn-sm" onclick="closeOverlay()">Close</button></div>' +
+      '<div class="drawer-body">' + taskForm(t) + '</div>' +
+      '<div class="drawer-foot">' +
+        '<button class="btn btn-danger" onclick="removeTask()">Delete</button>' +
+        '<button class="btn" onclick="runTask(\'' + t.id + '\')">Run in Kilo</button>' +
+        '<button class="btn btn-primary" onclick="saveTask()">Save</button>' +
+      '</div></div></div>';
+  }
+
+  function closeOverlay() { document.getElementById('overlay-root').innerHTML = ''; }
+
+  async function saveTask() {
+    const payload = readForm();
+    try {
+      if (selectedId) await api('/api/tasks/' + selectedId, { method: 'PATCH', body: JSON.stringify(payload) });
+      else await api('/api/tasks', { method: 'POST', body: JSON.stringify(payload) });
+      closeOverlay();
+      await loadTasks();
+      toast('Task saved');
+    } catch (err) { toast(err.message, true); }
+  }
+
+  async function removeTask() {
+    if (!selectedId || !confirm('Delete this task? The Kilo session is kept.')) return;
+    try {
+      await api('/api/tasks/' + selectedId, { method: 'DELETE' });
+      closeOverlay();
+      await loadTasks();
+      toast('Task deleted');
+    } catch (err) { toast(err.message, true); }
+  }
+
+  document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') closeOverlay(); });
+  window.addEventListener('focus', loadTasks);
+
+  loadTasks();
+  checkKilo();
+  setInterval(checkKilo, 30000);
+</script>
+</body>
+</html>
