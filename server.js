@@ -722,7 +722,8 @@ app.post('/api/kilo/session/:sessionId/prompt', async (req, res) => {
     const prompt = typeof req.body.prompt === 'string' ? req.body.prompt : req.body.prompt?.text;
     if (!prompt) return res.status(400).json({ error: 'prompt required' });
 
-    const resp = await fetch(`${KILO_URL}/session/${sessionId}/message`, {
+    // Use prompt_async for non-streaming prompt (Kilo's async API)
+    const resp = await fetch(`${KILO_URL}/session/${sessionId}/prompt_async`, {
       method: 'POST',
       headers: kiloHeaders(),
       body: JSON.stringify({ parts: [{ type: 'text', text: prompt }], model: kiloModelRef(req.body.model), agent: req.body.agent }),
@@ -731,8 +732,32 @@ app.post('/api/kilo/session/:sessionId/prompt', async (req, res) => {
       const errText = await resp.text();
       return res.status(resp.status).json({ error: `Kilo error (${resp.status}): ${errText}` });
     }
-    const message = await resp.json();
-    res.json({ success: true, sessionId, model: message.info?.modelID, provider: message.info?.providerID, text: messageText(message) });
+    
+    // Poll for response (up to 120s for first token)
+    let attempts = 0;
+    let firstToken = false;
+    while (true) {
+      await new Promise(r => setTimeout(r, firstToken ? 500 : 1000));
+      attempts++;
+      const msgRes = await fetch(`${KILO_URL}/session/${sessionId}/message?${kiloDirectoryQuery()}`, {
+        headers: { 'x-kilo-directory': KILO_DIRECTORY }
+      });
+      if (!msgRes.ok) continue;
+      const messages = await msgRes.json();
+      if (!messages || !messages.length) continue;
+      const assistant = [...messages].reverse().find(m => m.info?.role === 'assistant' || m.role === 'assistant');
+      if (assistant) {
+        const textParts = assistant.parts?.filter(p => p.type === 'text' && p.text && p.text.trim())?.map(p => p.text) || [];
+        if (textParts.length > 0) {
+          if (!firstToken) firstToken = true;
+          const text = textParts.join('\n');
+          return res.json({ success: true, sessionId, model: assistant.info?.modelID, provider: assistant.info?.providerID, text });
+        }
+      }
+      if (!firstToken && attempts > 120) {
+        return res.status(504).json({ error: 'Kilo response timeout' });
+      }
+    }
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -788,7 +813,7 @@ app.post('/api/kilo/session/:sessionId/prompt_stream', async (req, res) => {
   })();
 
   try {
-    const resp = await fetch(`${KILO_URL}/session/${sessionId}/message`, {
+    const resp = await fetch(`${KILO_URL}/session/${sessionId}/prompt_async`, {
       method: 'POST',
       headers: kiloHeaders(),
       body: JSON.stringify({ parts: [{ type: 'text', text: prompt }], model: kiloModelRef(req.body.model), agent: req.body.agent }),
@@ -797,18 +822,51 @@ app.post('/api/kilo/session/:sessionId/prompt_stream', async (req, res) => {
       const errText = await resp.text();
       if (!closed) res.write(JSON.stringify({ error: `Kilo error (${resp.status}): ${errText}` }) + '\n');
     } else {
-      const message = await resp.json();
-      const text = messageText(message);
-      const failed = message.info?.error;
-      if (failed && !text) {
-        if (!closed) res.write(JSON.stringify({ error: failed.message || JSON.stringify(failed) }) + '\n');
-      } else if (!closed) {
-        res.write(JSON.stringify({
-          done: true,
-          text,
-          model: message.info?.modelID,
-          provider: message.info?.providerID,
-        }) + '\n');
+      // Poll for response and stream text parts as they arrive
+      let attempts = 0;
+      let firstToken = false;
+      let lastTextLength = 0;
+      let stableCount = 0;
+      let streamedText = '';
+      while (true) {
+        await new Promise(r => setTimeout(r, firstToken ? 500 : 1000));
+        attempts++;
+        const msgRes = await fetch(`${KILO_URL}/session/${sessionId}/message?${kiloDirectoryQuery()}`, {
+          headers: { 'x-kilo-directory': KILO_DIRECTORY }
+        });
+        if (!msgRes.ok) continue;
+        const messages = await msgRes.json();
+        if (!messages || !messages.length) continue;
+const assistant = [...messages].reverse().find(m => m.info?.role === 'assistant' || m.role === 'assistant');
+          if (assistant) {
+            const textParts = assistant.parts?.filter(p => p.type === 'text' && p.text && p.text.trim())?.map(p => p.text) || [];
+            if (textParts.length > 0) {
+              if (!firstToken) firstToken = true;
+              const currentText = textParts.join('\n');
+if (currentText.length > lastTextLength) {
+              const delta = currentText.slice(lastTextLength);
+              if (!closed) res.write(JSON.stringify({ delta }) + '\n');
+              lastTextLength = currentText.length;
+              streamedText = currentText;
+              stableCount = 0;
+            } else if (currentText.length === lastTextLength) {
+              stableCount++;
+            }
+            if (firstToken && stableCount >= 2 && streamedText.length > 0) {
+              if (!closed) res.write(JSON.stringify({
+                done: true,
+                text: streamedText,
+                model: assistant.info?.modelID,
+                provider: assistant.info?.providerID,
+              }) + '\n');
+              break;
+            }
+            }
+          }
+        if (!firstToken && attempts > 120) {
+          if (!closed) res.write(JSON.stringify({ error: 'Kilo response timeout' }) + '\n');
+          break;
+        }
       }
     }
   } catch (err) {
@@ -892,10 +950,13 @@ app.post('/api/tools/execute', async (req, res) => {
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 
 const server = createServer(app);
-server.listen(PORT, '127.0.0.1', () => {
+server.listen(PORT, '0.0.0.0', () => {
   const { port } = server.address();
-  console.log(`Web app running on http://127.0.0.1:${port}`);
+  console.log(`Web app running on http://0.0.0.0:${port}`);
+  console.log(`Local: http://localhost:${port}`);
   console.log(`Ollama: ${OLLAMA_URL}`);
   console.log(`Workspace root: ${__dirname}`);
+  console.log(`Kilo: ${KILO_URL}`);
+});
   console.log(`Uploads dir: ${UPLOADS_DIR}`);
 });
