@@ -33,6 +33,26 @@ const rawRoots = process.env.ALLOWED_FS_ROOTS
 const ALLOWED_FS_ROOTS = rawRoots.filter(Boolean).map(r => path.resolve(r).toLowerCase());
 
 app.use(cors());
+
+// Optional HTTP Basic auth, enabled when BASIC_AUTH_USER + BASIC_AUTH_PASS are set
+const BASIC_AUTH_USER = process.env.BASIC_AUTH_USER;
+const BASIC_AUTH_PASS = process.env.BASIC_AUTH_PASS;
+if (BASIC_AUTH_USER && BASIC_AUTH_PASS) {
+  app.use((req, res, next) => {
+    const header = req.headers.authorization || '';
+    const [scheme, encoded] = header.split(' ');
+    if (scheme === 'Basic' && encoded) {
+      const decoded = Buffer.from(encoded, 'base64').toString('utf8');
+      const idx = decoded.indexOf(':');
+      if (idx > -1 && decoded.slice(0, idx) === BASIC_AUTH_USER && decoded.slice(idx + 1) === BASIC_AUTH_PASS) {
+        return next();
+      }
+    }
+    res.setHeader('WWW-Authenticate', 'Basic realm="computera-ops", charset="UTF-8"');
+    res.status(401).send('Authentication required');
+  });
+}
+
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/uploads', express.static(UPLOADS_DIR));
@@ -957,6 +977,5 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`Ollama: ${OLLAMA_URL}`);
   console.log(`Workspace root: ${__dirname}`);
   console.log(`Kilo: ${KILO_URL}`);
-});
   console.log(`Uploads dir: ${UPLOADS_DIR}`);
 });
