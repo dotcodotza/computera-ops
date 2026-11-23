@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Private consultation</title>
+  <link rel="stylesheet" href="/consult/consult.css">
+</head>
+<body>
+  <main class="stage">
+    <header class="topbar">
+      <div class="brand">Private consultation</div>
+      <div class="status" id="status" role="status">Starting…</div>
+    </header>
+
+    <section class="videos" aria-label="Video">
+      <div class="tile remote" id="remoteTile">
+        <video id="remoteVideo" autoplay playsinline></video>
+        <div class="placeholder" id="remotePlaceholder">Waiting for the other person…</div>
+        <span class="tag" id="remoteTag">Guest</span>
+      </div>
+      <div class="tile local" id="localTile">
+        <video id="localVideo" autoplay playsinline muted></video>
+        <div class="placeholder" id="localPlaceholder" hidden>Camera off</div>
+        <span class="tag">You</span>
+      </div>
+    </section>
+
+    <section class="share" id="sharePanel" hidden>
+      <label for="link">Send this private link to the person you are consulting</label>
+      <div class="share-row">
+        <input id="link" readonly spellcheck="false">
+        <button id="copy" type="button">Copy link</button>
+      </div>
+      <p class="hint" id="shareHint">The link works once, until you end the consultation or it expires.</p>
+    </section>
+
+    <section class="notice" id="notice" hidden></section>
+
+    <footer class="controls">
+      <button id="toggleVideo" type="button" class="primary">Turn video off</button>
+      <button id="toggleAudio" type="button">Mute</button>
+      <button id="reconnect" type="button" hidden>Reconnect</button>
+      <button id="end" type="button" class="danger">End consultation</button>
+    </footer>
+
+    <p class="footnote">Video and audio go directly between the two browsers; the server only sets up the connection.</p>
+  </main>
+  <script src="/consult/consult.js" type="module"></script>
+</body>
+</html>

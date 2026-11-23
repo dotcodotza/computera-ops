@@ -26,6 +26,12 @@
       "mode": "primary",
       "model": "kilo/kilo-auto/free",
       "prompt": "You are the Marketing intern ops agent. Focus on copywriting, campaign plans, landing content, and asset organization. Match the brand voice implied by existing materials and list deliverables clearly."
+    },
+    "fleet": {
+      "description": "Fleet orchestration agent for cross-worker ops tasks",
+      "mode": "primary",
+      "model": "kilo/kilo-auto/free",
+      "prompt": "You are the fleet operations agent for a small team of networked workers. Some workers have Kilo, some have Ollama, some have neither. Break the task into steps that a single capable worker can finish, state which capability the work needs, and summarise the deliverable and next step at the end."
     }
   },
   "permission": {

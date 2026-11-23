@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Computera Studio</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+  <link rel="stylesheet" href="/app/app.css">
+  <link rel="stylesheet" href="/app/studio.css">
+</head>
+<body>
+
+  <!-- Sidebar -->
+  <aside id="sidebar">
+    <div class="sidebar-header">
+      <div style="font-weight: 700; font-size: 14px; display: flex; align-items: center; gap: 8px;"><span>⚡</span> Computera AI</div>
+      <button class="btn btn-sm btn-primary" onclick="startNewChat()">+ New Chat</button>
+    </div>
+    <div class="sidebar-tabs">
+      <div class="sidebar-tab active" onclick="switchSidebarTab('chats')">Chats</div>
+      <div class="sidebar-tab" onclick="switchSidebarTab('files')">Files</div>
+      <div class="sidebar-tab" onclick="switchSidebarTab('memory')">Memory</div>
+      <div class="sidebar-tab" onclick="switchSidebarTab('kilo')">Kilo</div>
+      <div class="sidebar-tab" onclick="switchSidebarTab('settings')">Settings</div>
+    </div>
+    <div id="tab-chats" class="sidebar-pane active">
+      <div id="chat-sessions-list" style="display: flex; flex-direction: column; gap: 6px;"></div>
+    </div>
+    <div id="tab-files" class="sidebar-pane">
+      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+        <span style="font-size: 12px; font-weight: 600; color: var(--text-muted);">WORKSPACE FILES</span>
+        <div style="display: flex; gap: 4px;">
+          <button class="btn btn-sm btn-secondary" onclick="loadDirectory()">🔄</button>
+          <button class="btn btn-sm btn-secondary" onclick="openNewFileModal()">+ File</button>
+        </div>
+      </div>
+      <div class="drop-zone" onclick="document.getElementById('file-upload-input').click()" ondragover="event.preventDefault()" ondrop="handleDrop(event)">
+        📎 Drop or click to upload document<br><small style="opacity:0.7;">PDF opens in POV, other files in the editor</small>
+      </div>
+      <input type="file" id="file-upload-input" multiple style="display:none;" onchange="handleFileUploads(this.files)">
+      <div class="file-list" id="files-list-container"><div style="color: var(--text-dim); font-size: 12px; text-align: center; padding: 20px 0;">Loading workspace...</div></div>
+    </div>
+    <div id="tab-memory" class="sidebar-pane">
+      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+        <span style="font-size: 12px; font-weight: 600; color: var(--text-muted);">SAVED MEMORIES</span>
+        <button class="btn btn-sm btn-secondary" onclick="openNewMemoryModal()">+ Save</button>
+      </div>
+      <div id="memory-list-container" style="display: flex; flex-direction: column; gap: 8px;"></div>
+    </div>
+    <div id="tab-kilo" class="sidebar-pane">
+      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+        <span style="font-size: 12px; font-weight: 600; color: var(--text-muted);">KILO AGENT SESSIONS</span>
+        <button class="btn btn-sm btn-primary" onclick="createKiloSession()">+ New Session</button>
+      </div>
+      <div id="kilo-sessions-list" style="display: flex; flex-direction: column; gap: 6px; flex: 1; overflow-y: auto;"></div>
+    </div>
+    <div id="tab-settings" class="sidebar-pane">
+      <div class="settings-section">
+        <label>Ollama Model</label>
+        <select id="settings-model-select" class="model-selector" onchange="changeModel(this.value)"></select>
+        <div class="active-doc-indicator" id="active-doc-indicator" style="display:none;">
+          <span>📄 Active: <span id="active-doc-name"></span></span>
+          <button class="btn btn-sm btn-secondary" onclick="closeActiveDocument()">Clear</button>
+        </div>
+      </div>
+      <div class="settings-section">
+        <label>Workspace Root</label>
+        <input type="text" id="settings-workspace-path" readonly style="width: 100%; padding: 8px; background: var(--bg-dark); border: 1px solid var(--border); border-radius: 6px; color: var(--text-muted); font-family: monospace; font-size: 11px;">
+      </div>
+      <div class="settings-section">
+        <label>Custom System Instructions</label>
+        <textarea id="settings-system-prompt" rows="5" style="width: 100%; padding: 8px; background: var(--bg-dark); border: 1px solid var(--border); border-radius: 6px; color: var(--text-main); font-size: 12px; resize: vertical;" placeholder="Add custom behavior..."></textarea>
+      </div>
+      <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main id="main-content">
+    <header class="top-bar">
+      <div class="brand-section">
+        <button class="btn-icon" onclick="toggleSidebar()" title="Toggle Sidebar">☰</button>
+        <div class="brand-logo">C</div>
+        <div>
+          <div class="brand-title">Computera Studio</div>
+          <div class="brand-subtitle" id="workspace-subtext">Chat + POV</div>
+        </div>
+      </div>
+      <div class="nav-actions">
+        <div class="status-badge" id="ollama-status"><div class="status-dot"></div><span id="ollama-status-text">Checking Ollama...</span></div>
+        <div class="status-badge" id="kilo-status"><div class="status-dot"></div><span id="kilo-status-text">Checking Kilo...</span></div>
+        <select id="header-model-select" class="model-selector" onchange="changeModel(this.value)"><option value="qwen2.5-coder:1.5b">qwen2.5-coder:1.5b</option></select>
+        <select id="kilo-agent-select" class="model-selector" onchange="changeKiloAgent(this.value)" style="min-width: 140px;">
+          <option value="master">🎯 Master</option>
+          <option value="it">🛠️ IT</option>
+          <option value="admin">🗂️ Admin</option>
+          <option value="marketing">📣 Marketing</option>
+          <option value="code">💻 Code</option>
+          <option value="plan">📋 Plan</option>
+        </select>
+        <a class="btn btn-sm btn-secondary" href="/chat" title="Chat without the document pane">💬 Chat</a>
+        <a class="btn btn-sm btn-secondary" href="/dashboard" title="Ops dashboard: calendar & tasks">📅 Dashboard</a>
+        <button class="btn btn-sm btn-secondary" onclick="clearCurrentChat()" title="Clear Chat">🗑️ Clear</button>
+      </div>
+    </header>
+
+    <div class="split-view">
+      <!-- Restore rail, only visible while the chat is collapsed -->
+      <div id="chat-rail">
+        <button class="btn-icon" id="chat-rail-btn" title="Show chat" aria-label="Show chat">💬</button>
+      </div>
+
+      <!-- Left: chat -->
+      <div id="chat-copilot-panel">
+        <div id="chat-panel-header" style="padding: 10px 16px; background: var(--bg-dark); border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; flex-shrink: 0;">
+          <div style="font-weight: 600; font-size: 14px;">AI Co-Pilot</div>
+          <div style="display: flex; align-items: center; gap: 8px; min-width: 0;">
+            <div style="font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" id="copilot-subtitle">Document-aware</div>
+            <button class="btn-icon" id="chat-collapse" title="Collapse chat (work on the document)">⤓</button>
+          </div>
+        </div>
+        <div class="task-banner hidden" id="task-banner">
+          <div class="task-banner-main">
+            <span class="task-banner-label">TASK</span>
+            <strong id="task-banner-title"></strong>
+            <span class="task-pill" id="task-banner-status"></span>
+            <span class="task-banner-meta" id="task-banner-meta"></span>
+          </div>
+          <div class="task-banner-actions">
+            <button class="btn btn-sm btn-secondary" onclick="setTaskStatus('review')">Mark review</button>
+            <button class="btn btn-sm btn-secondary" onclick="setTaskStatus('done')">Mark done</button>
+            <a class="btn btn-sm btn-secondary" href="/dashboard">Back to dashboard</a>
+            <button class="btn btn-sm btn-secondary" onclick="dismissTaskBanner()" title="Detach task (session stays)">✕</button>
+          </div>
+        </div>
+        <div class="messages-container" id="messages-container">
+          <div class="welcome-screen" id="welcome-screen">
+            <div class="welcome-icon">⚡</div>
+            <h1 class="welcome-title">Document Co-Pilot</h1>
+            <p class="welcome-desc">Open a PDF from the Files tab and it loads into POV. Ask about it here, or let the AI edit the file — POV reloads when it changes on disk.</p>
+          </div>
+          <div id="messages-list"></div>
+        </div>
+        <div class="input-section">
+          <div class="input-wrapper">
+            <div class="attachments-bar" id="attachments-bar"></div>
+            <div class="input-container">
+              <textarea id="chat-input" rows="1" placeholder="Ask about the document or request edits…" onkeydown="handleInputKeydown(event)" oninput="autoResizeTextarea(this)"></textarea>
+              <div class="input-toolbar">
+                <div class="toolbar-left">
+                  <button class="btn btn-sm btn-secondary" onclick="openFilePickerModal()">📎 Attach File</button>
+                  <button class="btn btn-sm btn-primary" onclick="createKiloSession()" title="New Kilo Agent Session">🤖 Kilo</button>
+                </div>
+                <div class="toolbar-right">
+                  <button class="btn btn-sm btn-secondary" id="stop-btn" style="display: none;" onclick="stopGeneration()">⏹️ Stop</button>
+                  <button class="btn btn-primary" id="send-btn" onclick="sendMessage()">Send ➔</button>
+                </div>
+              </div>
+            </div>
+            <div style="font-size: 11px; color: var(--text-dim); text-align: center; margin-top: 2px;">Press <kbd>Enter</kbd> to send • <kbd>Shift + Enter</kbd> for newline</div>
+          </div>
+        </div>
+      </div>
+
+      <div id="split-handle" title="Drag to resize · double-click to collapse the chat"></div>
+
+      <!-- Right: POV (pdfcraft) -->
+      <div id="pov-panel">
+        <div id="pov-header">
+          <div id="pov-doc-title">No document</div>
+          <div id="pov-status"></div>
+          <div class="doc-actions">
+            <button class="btn btn-sm btn-secondary" id="pov-reload" title="Load the workspace copy into POV">↻ Reload</button>
+            <button class="btn btn-sm btn-secondary" id="pov-upload" title="Upload a PDF (e.g. one POV downloaded) into the workspace">⬆ Upload</button>
+            <button class="btn btn-sm btn-secondary" id="pov-newtab" title="Open POV in a new tab">↗ New tab</button>
+            <button class="btn btn-sm btn-secondary" id="pov-max" title="Maximise POV">⛶</button>
+          </div>
+        </div>
+        <div class="pov-banner" id="pov-banner">
+          <span id="pov-banner-text"></span>
+          <div class="actions">
+            <button class="btn btn-sm btn-secondary" id="pov-banner-reload">Reload</button>
+            <button class="btn btn-sm btn-secondary" id="pov-banner-close">✕</button>
+          </div>
+        </div>
+        <iframe id="pov-frame" title="POV document editor" src="about:blank"></iframe>
+        <div class="pov-hint">POV saves back into the open workspace file. If the AI (or another editor) changes it on disk, this pane reloads it.</div>
+        <input type="file" id="pov-upload-input" accept="application/pdf,.pdf" style="display:none;">
+      </div>
+    </div>
+  </main>
+
+  <!-- File Viewer / Editor Modal -->
+  <div class="modal-backdrop" id="file-modal">
+    <div class="modal-box">
+      <div class="modal-header"><div class="modal-title"><span>📄</span> <span id="modal-filename">filename</span></div><button class="btn-icon" onclick="closeModal('file-modal')">✕</button></div>
+      <div class="modal-body">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+          <span style="font-size: 12px; color: var(--text-muted);" id="modal-filepath-info">Path</span>
+          <span style="font-size: 11px; color: var(--text-dim);" id="modal-filesize-info">0 KB</span>
+        </div>
+        <textarea id="modal-file-content" class="code-editor" spellcheck="false"></textarea>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="attachCurrentModalFile()">📎 Attach to Chat</button>
+        <button class="btn btn-primary" onclick="saveModalFile()">💾 Save to Disk</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- New File Modal -->
+  <div class="modal-backdrop" id="new-file-modal">
+    <div class="modal-box" style="max-width: 520px;">
+      <div class="modal-header"><div class="modal-title">➕ Create New File</div><button class="btn-icon" onclick="closeModal('new-file-modal')">✕</button></div>
+      <div class="modal-body" style="display: flex; flex-direction: column; gap: 12px;">
+        <div><label style="display: block; font-size: 12px; font-weight: 600; margin-bottom: 6px;">File Name or Relative Path</label><input type="text" id="new-filename-input" placeholder="e.g., report.pdf or notes.md" style="width: 100%; padding: 8px 10px; background: var(--bg-dark); border: 1px solid var(--border); border-radius: 6px; color: #fff; font-size: 13px; outline: none;"></div>
+        <div><label style="display: block; font-size: 12px; font-weight: 600; margin-bottom: 6px;">Initial Content (Optional)</label><textarea id="new-file-initial-content" rows="6" class="code-editor" style="height: 160px;" placeholder="Type file content..."></textarea></div>
+      </div>
+      <div class="modal-footer"><button class="btn btn-secondary" onclick="closeModal('new-file-modal')">Cancel</button><button class="btn btn-primary" onclick="createNewFileSubmit()">Create File</button></div>
+    </div>
+  </div>
+
+  <!-- New Memory Modal -->
+  <div class="modal-backdrop" id="new-memory-modal">
+    <div class="modal-box" style="max-width: 480px;">
+      <div class="modal-header"><div class="modal-title">🧠 Save Memory</div><button class="btn-icon" onclick="closeModal('new-memory-modal')">✕</button></div>
+      <div class="modal-body" style="display: flex; flex-direction: column; gap: 12px;">
+        <div><label style="display: block; font-size: 12px; font-weight: 600; margin-bottom: 6px;">Memory Key</label><input type="text" id="new-memory-key" placeholder="e.g. project_summary" style="width: 100%; padding: 8px 10px; background: var(--bg-dark); border: 1px solid var(--border); border-radius: 6px; color: #fff; font-size: 13px; outline: none;"></div>
+        <div><label style="display: block; font-size: 12px; font-weight: 600; margin-bottom: 6px;">Memory Data</label><textarea id="new-memory-data" rows="4" class="code-editor" style="height: 120px;" placeholder="Notes or facts to remember..."></textarea></div>
+      </div>
+      <div class="modal-footer"><button class="btn btn-secondary" onclick="closeModal('new-memory-modal')">Cancel</button><button class="btn btn-primary" onclick="saveNewMemorySubmit()">Save Memory</button></div>
+    </div>
+  </div>
+
+  <script src="/app/chat.js"></script>
+  <script src="/app/studio.js"></script>
+</body>
+</html>

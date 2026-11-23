@@ -1,0 +1,53 @@
+/* ---------- Studio: chat + POV split ---------- */
+/* studio.js replaces this with a pixel-clamped width once the page is ready. */
+/* min-height: 0 lets the stacked chat actually shrink to the dragged height:
+   without it the flex item's automatic minimum is its content height. */
+.split-view > #chat-copilot-panel { flex: 0 0 45%; border-left: none; min-width: 0; min-height: 0; }
+
+#pov-panel { flex: 1 1 auto; display: flex; flex-direction: column; background: var(--bg-dark); min-width: 0; min-height: 0; border-left: 1px solid var(--border); }
+
+#pov-header { padding: 8px 12px; background: var(--bg-surface); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+#pov-doc-title { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 1; min-width: 0; }
+#pov-status { font-size: 11px; color: var(--text-dim); font-family: 'JetBrains Mono', monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; text-align: right; }
+#pov-status.bad { color: var(--danger); }
+
+#pov-frame { flex: 1; width: 100%; border: none; display: block; background: #19191c; min-height: 0; }
+
+#split-handle { width: 6px; flex-shrink: 0; background: var(--border); cursor: col-resize; touch-action: none; transition: background 0.15s; }
+#split-handle:hover, body.resizing #split-handle { background: var(--accent); }
+body.resizing { user-select: none; cursor: col-resize; }
+body.resizing iframe { pointer-events: none; }
+
+.pov-banner { display: none; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 12px; background: rgba(245, 158, 11, 0.1); border-bottom: 1px solid rgba(245, 158, 11, 0.3); color: var(--warning); font-size: 12px; }
+.pov-banner.active { display: flex; }
+.pov-banner .actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+.pov-hint { padding: 6px 12px; background: var(--bg-panel); border-top: 1px solid var(--border); color: var(--text-dim); font-size: 11px; }
+
+body.pov-max #chat-copilot-panel, body.pov-max #split-handle { display: none; }
+body.pov-max #pov-panel { border-left: none; }
+
+/* A narrow window cannot host the POV workbench and the chat side by side (the
+   POV pane ends up ~340px and its own UI collapses). Stack them instead: POV on
+   top, chat underneath so its composer still sits at the bottom of the page. */
+@media (max-width: 1200px) {
+  .split-view { flex-direction: column; }
+  #pov-panel { order: 1; border-left: none; border-top: 1px solid var(--border); }
+  #split-handle { order: 2; width: auto; height: 6px; cursor: row-resize; }
+  #chat-copilot-panel { order: 3; }
+  .split-view > #chat-copilot-panel { flex: 0 0 42%; }
+  body.resizing { cursor: row-resize; }
+  body.pov-max #pov-panel { border-top: none; }
+}
+
+/* ---------- collapsed chat: work on the document full-bleed ---------- */
+#chat-rail { display: none; flex: 0 0 30px; flex-direction: column; align-items: center; padding-top: 8px; background: var(--bg-surface); border-right: 1px solid var(--border); }
+
+body.chat-collapsed #chat-copilot-panel, body.chat-collapsed #split-handle { display: none; }
+body.chat-collapsed #chat-rail { display: flex; }
+body.chat-collapsed #pov-panel { border-left: none; border-top: none; }
+
+@media (max-width: 1200px) {
+  /* Stacked: the rail becomes a slim bar under the document. */
+  #chat-rail { order: 3; flex: 0 0 38px; flex-direction: row; padding-top: 0; align-items: center; justify-content: center; border-right: none; border-top: 1px solid var(--border); }
+}

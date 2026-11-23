@@ -97,6 +97,19 @@
     .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--bg-panel); border: 1px solid var(--border); padding: 10px 16px; border-radius: 8px; font-size: 13px; z-index: 60; }
     .toast.error { border-color: rgba(239,68,68,0.5); color: #fca5a5; }
     code { font-size: 11px; color: var(--text-muted); word-break: break-all; }
+
+    /* Fleet */
+    .grid-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+    .wcard { background: var(--bg-panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 6px; }
+    .wcard.offline { opacity: 0.65; }
+    .wcard-name { font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 6px; }
+    .cap { font-size: 11px; padding: 1px 7px; border-radius: 20px; border: 1px solid var(--border); color: var(--text-muted); }
+    .cap.on { color: var(--success); border-color: rgba(16,185,129,0.35); background: rgba(16,185,129,0.1); }
+    .cap.off { color: var(--text-dim); }
+    .host-box { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .link-code { background: var(--bg-panel); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-family: ui-monospace, monospace; font-size: 12px; color: var(--text-main); word-break: break-all; }
+    .event-row { display: flex; gap: 8px; font-size: 12px; padding: 4px 0; border-bottom: 1px solid var(--border); }
+    .event-kind { color: var(--accent); min-width: 130px; }
   </style>
 </head>
 <body>
@@ -105,12 +118,13 @@
       <div class="logo">C</div>
       <div>
         <h1>Ops Dashboard</h1>
-        <span>Calendar &middot; Tasks &middot; Kilo runner</span>
+        <span>Calendar &middot; Tasks &middot; Fleet &middot; Kilo runner</span>
       </div>
     </div>
     <div class="actions">
       <div class="badge" id="kilo-status"><div class="dot"></div><span id="kilo-status-text">Checking Kilo...</span></div>
-      <button class="btn" onclick="location.href='/'">Open Chat</button>
+      <button class="btn" onclick="location.href='/chat'">Open Chat</button>
+      <button class="btn" onclick="location.href='/studio'">Chat + PDF</button>
       <button class="btn btn-primary" onclick="openCreate()">+ New Task</button>
     </div>
   </header>
@@ -119,6 +133,7 @@
     <div class="tabs">
       <button class="tab active" id="tab-cal" onclick="switchTab('calendar')">Calendar</button>
       <button class="tab" id="tab-tasks" onclick="switchTab('tasks')">Tasks</button>
+      <button class="tab" id="tab-fleet" onclick="switchTab('fleet')">Fleet</button>
       <span class="muted" id="task-count" style="margin-left:auto;align-self:center;"></span>
     </div>
 
@@ -166,6 +181,21 @@
       </table>
       <div class="empty hidden" id="tasks-empty">No tasks match these filters.</div>
     </section>
+
+    <section class="panel hidden" id="view-fleet">
+      <div class="cal-head">
+        <div class="cal-title">Today&rsquo;s host</div>
+        <div class="actions">
+          <button class="btn btn-sm" onclick="rotateHost()">Rotate now</button>
+          <button class="btn btn-sm" onclick="refreshFleet()">Refresh</button>
+        </div>
+      </div>
+      <div class="meta-box" id="today-host"></div>
+      <div class="cal-title" style="margin:18px 0 10px;">Workers</div>
+      <div class="grid-cards" id="fleet-workers"></div>
+      <div class="cal-title" style="margin:18px 0 10px;">Fleet activity</div>
+      <div id="fleet-events"></div>
+    </section>
   </main>
 
   <div id="overlay-root"></div>
@@ -182,6 +212,7 @@
   let cursor = new Date();
   let newOutput = {};
   let selectedId = null;
+  let fleet = { workers: [], today: null, self: null, role: 'master', events: [] };
 
   function toast(msg, isError) {
     const el = document.createElement('div');
@@ -244,8 +275,88 @@
     view = tab;
     document.getElementById('view-calendar').classList.toggle('hidden', tab !== 'calendar');
     document.getElementById('view-tasks').classList.toggle('hidden', tab !== 'tasks');
+    document.getElementById('view-fleet').classList.toggle('hidden', tab !== 'fleet');
     document.getElementById('tab-cal').classList.toggle('active', tab === 'calendar');
     document.getElementById('tab-tasks').classList.toggle('active', tab === 'tasks');
+    document.getElementById('tab-fleet').classList.toggle('active', tab === 'fleet');
+    if (tab === 'fleet') loadFleet();
+  }
+
+  function workerLabel(id) {
+    const w = (fleet.workers || []).find(x => x.id === id);
+    return w ? w.name : id;
+  }
+
+  async function loadFleet() {
+    try {
+      const roster = await api('/api/fleet/workers');
+      const events = await api('/api/fleet/events?limit=30').catch(() => ({ events: [] }));
+      fleet = { ...roster, events: events.events || [] };
+      renderFleet();
+    } catch { /* a worker with an unreachable master simply shows nothing */ }
+  }
+
+  function capBadge(label, on) {
+    return '<span class="cap ' + (on ? 'on' : 'off') + '">' + label + (on ? ' ✓' : ' ✗') + '</span>';
+  }
+
+  function renderFleet() {
+    const host = document.getElementById('today-host');
+    if (host) {
+      const t = fleet.today || {};
+      const w = t.worker || {};
+      host.innerHTML =
+        '<div class="host-box">' +
+          '<div><div class="muted">' + escapeHtml(t.date || '') + '</div><div style="font-weight:600;">' + escapeHtml(w.name || 'no host assigned') + (t.is_self ? ' (this node)' : '') + '</div></div>' +
+          (t.link
+            ? '<code class="link-code">' + escapeHtml(t.link) + '</code><button class="btn btn-sm" onclick="copyLink()">Copy link</button>'
+            : '<span class="muted">No public URL configured for the host.</span>') +
+        '</div>' +
+        '<div class="kv" style="margin-top:8px;"><span>Stable entry</span><code>' + escapeHtml(location.origin + '/today') + '</code></div>';
+    }
+
+    const grid = document.getElementById('fleet-workers');
+    if (grid) {
+      const workers = fleet.workers || [];
+      const selfId = (fleet.self || {}).id;
+      grid.innerHTML = workers.length ? workers.map(w => {
+        const caps = w.capabilities || {};
+        return '<div class="wcard' + (w.status === 'online' ? '' : ' offline') + '">' +
+          '<div class="wcard-name">' + escapeHtml(w.name || w.id) +
+            '<span class="badge' + (w.status === 'online' ? '' : ' offline') + '" style="margin-left:auto;font-size:10px;padding:2px 8px;"><div class="dot"></div><span>' + escapeHtml(w.status) + '</span></span>' +
+          '</div>' +
+          '<div class="muted">' + escapeHtml(w.base_url || 'no url') + (w.id === selfId ? ' · this node' : '') + '</div>' +
+          '<div style="display:flex;gap:6px;flex-wrap:wrap;">' + capBadge('Kilo', !!caps.kilo) + capBadge('Ollama', !!caps.ollama) +
+            (caps.models && caps.models.length ? '<span class="cap">' + caps.models.length + ' models</span>' : '') +
+          '</div>' +
+        '</div>';
+      }).join('') : '<div class="empty">No workers registered yet.</div>';
+    }
+
+    const events = document.getElementById('fleet-events');
+    if (events) {
+      const list = fleet.events || [];
+      events.innerHTML = list.length ? list.map(e =>
+        '<div class="event-row"><span class="event-kind">' + escapeHtml(e.kind) + '</span><span>' + escapeHtml(e.detail) + '</span>' +
+        '<span class="muted" style="margin-left:auto;">' + escapeHtml(new Date(e.created_at).toLocaleTimeString()) + '</span></div>'
+      ).join('') : '<div class="empty">No fleet activity yet.</div>';
+    }
+  }
+
+  async function refreshFleet() { await loadFleet(); toast('Fleet refreshed'); }
+
+  function copyLink() {
+    const t = fleet.today || {};
+    if (!t.link) return;
+    navigator.clipboard?.writeText(t.link).then(() => toast('Link copied'), () => toast('Copy failed', true));
+  }
+
+  async function rotateHost() {
+    try {
+      await api('/api/fleet/rotate', { method: 'POST', body: '{}' });
+      await loadFleet();
+      toast('Host rotated');
+    } catch (err) { toast(err.message, true); }
   }
 
   function shiftMonth(delta) {
@@ -361,7 +472,11 @@
       tr.appendChild(tdTitle);
 
       const tdOwner = document.createElement('td');
-      tdOwner.innerHTML = '<div>' + escapeHtml(t.assignee || '—') + '</div><div class="muted">' + AGENT_LABEL[t.agent] + '</div>';
+      const agentLabel = AGENT_LABEL[t.agent] || t.agent;
+      const workerName = t.assigned_worker ? workerLabel(t.assigned_worker) : '';
+      tdOwner.innerHTML = '<div>' + escapeHtml(t.assignee || '—') + '</div><div class="muted">' + escapeHtml(agentLabel) + (workerName ? ' · ' + escapeHtml(workerName) : '') + '</div>' +
+        (t.needs && t.needs !== 'any' ? '<div class="muted">needs ' + escapeHtml(t.needs) + '</div>' : '') +
+        (t.blocked_reason ? '<div class="muted" style="color:var(--warning)">blocked: ' + escapeHtml(t.blocked_reason) + '</div>' : '');
       tr.appendChild(tdOwner);
 
       const tdDue = document.createElement('td');
@@ -399,6 +514,19 @@
       run.textContent = t.kilo_session_id ? 'Open run' : 'Run';
       run.onclick = () => runTask(t.id);
       actions.appendChild(run);
+
+      const dispatchBtn = document.createElement('button');
+      dispatchBtn.className = 'btn btn-sm';
+      dispatchBtn.textContent = 'Dispatch';
+      dispatchBtn.onclick = async () => {
+        try {
+          const result = await api('/api/fleet/dispatch/' + t.id, { method: 'POST', body: '{}' });
+          toast(result.ok ? 'Dispatched' : (result.error || 'Not dispatched'), !result.ok);
+          loadTasks();
+          loadFleet();
+        } catch (err) { toast(err.message, true); }
+      };
+      actions.appendChild(dispatchBtn);
       tdActions.appendChild(actions);
       tr.appendChild(tdActions);
 
@@ -415,7 +543,7 @@
   function runTask(id) {
     const task = tasks.find(t => t.id === id);
     if (!task) return;
-    window.open('/?task=' + encodeURIComponent(id), '_blank');
+    window.open('/chat?task=' + encodeURIComponent(id), '_blank');
   }
 
   function field(label, inputHtml) {
@@ -434,6 +562,8 @@
       assignee: t.assignee || '',
       due_date: t.due_date || ymd(new Date()),
       tags: t.tags || [],
+      needs: t.needs || 'any',
+      assigned_worker: t.assigned_worker || '',
     };
     return '' +
       field('Title', '<input id="fm-title" value="' + attr(model.title) + '" placeholder="What needs to happen?">') +
@@ -450,10 +580,23 @@
         field('Due date', '<input id="fm-due" type="date" value="' + attr(model.due_date) + '">') +
         field('Tags', '<input id="fm-tags" value="' + attr(model.tags.join(', ')) + '" placeholder="ops, q4">') +
       '</div>' +
+      '<div class="grid2">' +
+        field('Needs', selectHtml('fm-needs', ['any', 'kilo', 'ollama'], model.needs, { any: 'Any capable worker', kilo: 'Kilo required', ollama: 'Ollama required' })) +
+        field('Worker', workerOptions(model.assigned_worker)) +
+      '</div>' +
       (isNew ? '' : '<div class="meta-box"><div class="kv"><span>Kilo session</span><code>' + escapeHtml(t.kilo_session_id || 'not started') + '</code></div><div class="kv"><span>Last run</span><span>' + escapeHtml(t.last_run_at || '—') + '</span></div></div>');
   }
 
   function attr(value) { return escapeHtml(String(value == null ? '' : value)).replace(/"/g, '&quot;'); }
+
+  function workerOptions(selected) {
+    const items = [{ id: '', name: 'Auto — best capable worker' }].concat(
+      (fleet.workers || []).map(w => ({ id: w.id, name: w.name + (w.status === 'online' ? '' : ' (offline)') }))
+    );
+    return '<select id="fm-worker">' + items.map(w =>
+      '<option value="' + attr(w.id) + '"' + (w.id === (selected || '') ? ' selected' : '') + '>' + escapeHtml(w.name) + '</option>'
+    ).join('') + '</select>';
+  }
 
   function selectHtml(id, values, selected, labels) {
     return '<select id="' + id + '">' + values.map(v =>
@@ -471,6 +614,8 @@
       assignee: document.getElementById('fm-assignee').value,
       due_date: document.getElementById('fm-due').value || null,
       tags: document.getElementById('fm-tags').value,
+      needs: document.getElementById('fm-needs').value,
+      assigned_worker: document.getElementById('fm-worker').value || null,
     };
   }
 
@@ -524,8 +669,10 @@
   window.addEventListener('focus', loadTasks);
 
   loadTasks();
+  loadFleet();
   checkKilo();
   setInterval(checkKilo, 30000);
+  setInterval(loadFleet, 20000);
 </script>
 </body>
 </html>

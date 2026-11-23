@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign In - Computera Ops</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-dark: #0f1117; --bg-surface: #161922; --bg-surface-hover: #1e2230;
+      --bg-panel: #1a1e2b; --border: #282e3f; --border-focus: #4f46e5;
+      --text-main: #f1f5f9; --text-muted: #94a3b8; --text-dim: #64748b;
+      --accent: #6366f1; --accent-hover: #4f46e5; --accent-glow: rgba(99, 102, 241, 0.25);
+      --success: #10b981; --warning: #f59e0b; --danger: #ef4444;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif; background: var(--bg-dark); color: var(--text-main); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+    .login-container { width: 100%; max-width: 420px; background: var(--bg-surface); border: 1px solid var(--border); border-radius: 16px; padding: 40px; box-shadow: 0 20px 40px rgba(0,0,0,0.4); }
+    .login-header { text-align: center; margin-bottom: 32px; }
+    .login-logo { width: 56px; height: 56px; border-radius: 14px; background: linear-gradient(135deg, var(--accent), #a855f7); display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 24px; color: white; box-shadow: 0 0 20px var(--accent-glow); margin: 0 auto 16px; }
+    .login-title { font-size: 22px; font-weight: 700; letter-spacing: -0.5px; margin-bottom: 6px; }
+    .login-subtitle { font-size: 14px; color: var(--text-muted); }
+    .login-form { display: flex; flex-direction: column; gap: 20px; }
+    .form-group { display: flex; flex-direction: column; gap: 8px; }
+    .form-label { font-size: 12px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+    .form-input { padding: 12px 14px; background: var(--bg-panel); border: 1px solid var(--border); border-radius: 8px; color: var(--text-main); font-size: 14px; font-family: inherit; outline: none; transition: border-color 0.15s, box-shadow 0.15s; }
+    .form-input:focus { border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-glow); }
+    .form-input::placeholder { color: var(--text-dim); }
+    .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 12px 20px; border-radius: 8px; font-size: 14px; font-weight: 600; font-family: inherit; cursor: pointer; transition: all 0.15s ease; border: 1px solid transparent; }
+    .btn-primary { background: var(--accent); color: white; width: 100%; }
+    .btn-primary:hover { background: var(--accent-hover); box-shadow: 0 0 12px var(--accent-glow); }
+    .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
+    .divider { display: flex; align-items: center; gap: 12px; color: var(--text-dim); font-size: 12px; margin: 4px 0; }
+    .divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+    .link-input-section { display: none; }
+    .link-input-section.visible { display: block; animation: fadeIn 0.2s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+    .tab-buttons { display: flex; gap: 4px; background: var(--bg-panel); border-radius: 8px; padding: 4px; }
+    .tab-btn { flex: 1; padding: 10px; border-radius: 6px; font-size: 13px; font-weight: 500; color: var(--text-muted); background: transparent; border: none; cursor: pointer; transition: all 0.15s; }
+    .tab-btn.active { background: var(--bg-surface); color: var(--text-main); box-shadow: 0 1px 3px rgba(0,0,0,0.2); }
+    .tab-btn:hover:not(.active) { color: var(--text-main); }
+    .error-message { display: none; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: #fca5a5; padding: 10px 12px; border-radius: 8px; font-size: 13px; }
+    .error-message.visible { display: block; animation: shake 0.3s ease; }
+    @keyframes shake { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
+    .help-text { font-size: 12px; color: var(--text-dim); text-align: center; margin-top: 16px; line-height: 1.5; }
+    .help-text code { background: var(--bg-panel); padding: 2px 6px; border-radius: 4px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--accent); }
+    .spinner { width: 18px; height: 18px; border: 2px solid rgba(255,255,255,0.2); border-top-color: white; border-radius: 50%; animation: spin 0.8s linear infinite; display: none; }
+    .spinner.visible { display: inline-block; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .btn-text { display: inline; }
+    .btn-loading .btn-text { display: none; }
+    .btn-loading .spinner { display: inline-block; }
+  </style>
+</head>
+<body>
+  <div class="login-container">
+    <div class="login-header">
+      <div class="login-logo">C</div>
+      <h1 class="login-title">Computera Ops</h1>
+      <p class="login-subtitle" id="login-subtitle">Sign in to access the dashboard</p>
+    </div>
+
+    <div class="error-message" id="error-message"></div>
+
+    <form class="login-form" id="login-form">
+      <div class="tab-buttons" role="tablist">
+        <button type="button" class="tab-btn active" id="tab-link" role="tab" aria-selected="true" onclick="switchTab('link')">Daily Link</button>
+        <button type="button" class="tab-btn" id="tab-basic" role="tab" aria-selected="false" onclick="switchTab('basic')">Username/Password</button>
+      </div>
+
+      <div class="link-input-section visible" id="section-link">
+        <div class="form-group">
+          <label class="form-label" for="link-token">Link Token</label>
+          <input type="text" class="form-input" id="link-token" name="link_token" placeholder="Paste today's link token" autocomplete="off" aria-describedby="link-help">
+        </div>
+        <p id="link-help" style="font-size: 11px; color: var(--text-dim);">Get the daily link from the master node or your fleet administrator.</p>
+      </div>
+
+      <div class="link-input-section" id="section-basic">
+        <div class="form-group">
+          <label class="form-label" for="username">Username</label>
+          <input type="text" class="form-input" id="username" name="username" placeholder="Enter username" autocomplete="username" required>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="password">Password</label>
+          <input type="password" class="form-input" id="password" name="password" placeholder="Enter password" autocomplete="current-password" required>
+        </div>
+      </div>
+
+      <button type="submit" class="btn btn-primary" id="submit-btn">
+        <span class="btn-text">Sign In</span>
+        <span class="spinner"></span>
+      </button>
+    </form>
+
+    <p class="help-text">
+      Running in <code>PUBLIC_MODE</code> with rotating daily links.
+      <br>Basic auth available when <code>BASIC_AUTH_USER</code> + <code>BASIC_AUTH_PASS</code> are configured.
+    </p>
+  </div>
+
+  <script>
+    // Detect which auth methods are available from URL params or server config
+    const urlParams = new URLSearchParams(window.location.search);
+    const hasBasicAuth = urlParams.has('basic') || document.body.dataset.basicAuth === 'true';
+    const hasLinkToken = urlParams.has('link') || !hasBasicAuth; // Default to link token mode
+
+    const form = document.getElementById('login-form');
+    const errorEl = document.getElementById('error-message');
+    const submitBtn = document.getElementById('submit-btn');
+    const sections = {
+      link: document.getElementById('section-link'),
+      basic: document.getElementById('section-basic'),
+    };
+    const tabs = {
+      link: document.getElementById('tab-link'),
+      basic: document.getElementById('tab-basic'),
+    };
+
+    let activeTab = hasBasicAuth && !hasLinkToken ? 'basic' : 'link';
+    switchTab(activeTab);
+
+    function switchTab(tab) {
+      activeTab = tab;
+      Object.keys(sections).forEach(key => {
+        sections[key].classList.toggle('visible', key === tab);
+        tabs[key].classList.toggle('active', key === tab);
+        tabs[key].setAttribute('aria-selected', key === tab);
+      });
+      if (tab === 'link') {
+        document.getElementById('link-token').focus();
+      } else {
+        document.getElementById('username').focus();
+      }
+      hideError();
+    }
+
+    function showError(msg) {
+      errorEl.textContent = msg;
+      errorEl.classList.add('visible');
+    }
+
+    function hideError() {
+      errorEl.classList.remove('visible');
+    }
+
+    function setLoading(loading) {
+      submitBtn.classList.toggle('btn-loading', loading);
+      submitBtn.disabled = loading;
+      document.querySelectorAll('.form-input, .tab-btn').forEach(el => el.disabled = loading);
+    }
+
+    // Handle link token submission
+    async function handleLinkToken(token) {
+      setLoading(true);
+      try {
+        // Verify the token by trying to access a protected endpoint
+        const res = await fetch('/api/health', {
+          headers: { 'Authorization': `Bearer ${token}` },
+          credentials: 'include',
+        });
+        if (res.ok) {
+          // Token works, set cookie and redirect
+          document.cookie = `cops_link=${encodeURIComponent(token)}; Path=/; SameSite=Lax; Max-Age=86400`;
+          window.location.href = '/';
+        } else {
+          // Try with query param (some endpoints accept ?t=)
+          const res2 = await fetch(`/?t=${encodeURIComponent(token)}`, { credentials: 'include' });
+          if (res2.ok || res2.redirected) {
+            document.cookie = `cops_link=${encodeURIComponent(token)}; Path=/; SameSite=Lax; Max-Age=86400`;
+            window.location.href = '/';
+          } else {
+            throw new Error('Invalid or expired link token');
+          }
+        }
+      } catch (err) {
+        showError(err.message || 'Invalid or expired link token. Please get today\'s link from the master node.');
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    // Handle basic auth submission
+    async function handleBasicAuth(username, password) {
+      setLoading(true);
+      try {
+        const credentials = btoa(`${username}:${password}`);
+        const res = await fetch('/api/health', {
+          headers: { 'Authorization': `Basic ${credentials}` },
+          credentials: 'include',
+        });
+        if (res.ok) {
+          // Store credentials for subsequent requests
+          sessionStorage.setItem('basicAuth', credentials);
+          window.location.href = '/';
+        } else {
+          throw new Error('Invalid username or password');
+        }
+      } catch (err) {
+        showError(err.message || 'Invalid username or password');
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      hideError();
+
+      if (activeTab === 'link') {
+        const token = document.getElementById('link-token').value.trim();
+        if (!token) {
+          showError('Please enter a link token');
+          return;
+        }
+        await handleLinkToken(token);
+      } else {
+        const username = document.getElementById('username').value.trim();
+        const password = document.getElementById('password').value;
+        if (!username || !password) {
+          showError('Please enter both username and password');
+          return;
+        }
+        await handleBasicAuth(username, password);
+      }
+    });
+
+    // Auto-focus first input
+    document.addEventListener('DOMContentLoaded', () => {
+      const firstInput = activeTab === 'link' ? 'link-token' : 'username';
+      document.getElementById(firstInput).focus();
+    });
+
+    // Enter key in inputs submits form
+    document.querySelectorAll('.form-input').forEach(input => {
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          form.dispatchEvent(new Event('submit'));
+        }
+      });
+    });
+  </script>
+</body>
+</html>

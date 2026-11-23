@@ -4,8 +4,9 @@ import fs from 'fs-extra';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createServer } from 'http';
+import { spawn } from 'child_process';
 import os from 'os';
-import { randomUUID } from 'crypto';
+import { randomUUID, timingSafeEqual } from 'crypto';
 import { PDFDocument, rgb } from 'pdf-lib';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
@@ -14,6 +15,12 @@ const mammoth = require('mammoth');
 const multerModule = require('multer');
 const multer = multerModule.default || multerModule;
 import { listTasks, getTask, createTask, updateTask, deleteTask, TaskError } from './tasks-db.js';
+import {
+  listWorkers, getWorker, upsertWorker, touchWorker, deleteWorker, countActiveByWorker,
+  recordEvent, listEvents, getRotation, saveRotation, setSetting, listSettings,
+} from './tasks-db.js';
+import { createFleet, probeCapabilities, startWorkerHeartbeat, todayKey } from './fleet.js';
+import { createKiloRuns } from './kilo-runs.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -22,6 +29,29 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
 const KILO_URL = process.env.KILO_URL || 'http://127.0.0.1:7777';
+
+// -------------------------------------------------------------
+// Fleet configuration
+// -------------------------------------------------------------
+const ROLE = String(process.env.NODE_ROLE || 'master').toLowerCase() === 'worker' ? 'worker' : 'master';
+const MASTER_URL = String(process.env.MASTER_URL || '').replace(/\/+$/, '');
+const FLEET_TOKEN = String(process.env.FLEET_TOKEN || '');
+const PUBLIC_MODE = ['1', 'true', 'yes', 'on'].includes(String(process.env.PUBLIC_MODE || '').toLowerCase());
+const PUBLIC_URL = String(process.env.PUBLIC_URL || '').replace(/\/+$/, '');
+
+// POV (pdfcraft) is proxied under our own origin so its same-origin postMessage
+// bridge works: the workspace PDF goes in, saves come back into the workspace.
+// POV_MODE=embed frames the public site instead (no bridge, no save-back).
+const POV_MODE = String(process.env.POV_MODE || 'proxy').toLowerCase() === 'embed' ? 'embed' : 'proxy';
+const POV_UPSTREAM = 'https://skywalkingzulu1.github.io/pdfcraft/';
+const POV_CACHE_DIR = path.join(__dirname, 'data', 'pdfcraft-cache');
+const POV_ASSET_RE = /^(|pov-web-[0-9a-f]+\.js|pov-web-[0-9a-f]+_bg\.wasm)$/;
+const SELF_ID = ROLE === 'worker'
+  ? String(process.env.WORKER_ID || `${os.hostname().toLowerCase().replace(/[^a-z0-9-]/g, '-')}-${PORT}`)
+  : 'master';
+const SELF_NAME = String(process.env.WORKER_NAME || (ROLE === 'worker' ? os.hostname() : 'masternode'));
+const SELF_URL = PUBLIC_URL || `http://localhost:${PORT}`;
+let activeLinkToken = String(process.env.HOST_LINK_TOKEN || '') || null;
 const MEMORY_DIR = path.join(__dirname, 'memory');
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
 
@@ -32,24 +62,102 @@ const rawRoots = process.env.ALLOWED_FS_ROOTS
 
 const ALLOWED_FS_ROOTS = rawRoots.filter(Boolean).map(r => path.resolve(r).toLowerCase());
 
+// Workspace sharing: what a visitor holding today's link may touch.
+// off = nothing, read = browse/download the workspace folder, write = also create/edit/delete.
+const WORKSPACE_SHARE = (() => {
+  const value = String(process.env.WORKSPACE_SHARE || 'read').toLowerCase();
+  if (['off', '0', 'no', 'false', 'none'].includes(value)) return 'off';
+  if (['write', 'rw', 'read-write', 'edit'].includes(value)) return 'write';
+  return 'read';
+})();
+// Shared access never leaves this folder, whatever ALLOWED_FS_ROOTS says.
+const SHARED_FS_ROOT = path.resolve(process.env.SHARED_FS_ROOT || __dirname).toLowerCase();
+// Private paths inside the workspace (secrets, database, local tooling) stay off the shared scope.
+const SHARED_FS_DENY = new Set(['data', 'node_modules', 'memory', '.git', '.freebuff', '.tools', '.env', '.env.local']);
+
 app.use(cors());
 
-// Optional HTTP Basic auth, enabled when BASIC_AUTH_USER + BASIC_AUTH_PASS are set
+// -------------------------------------------------------------
+// Fleet security helpers
+// -------------------------------------------------------------
+function sameSecret(candidate, expected) {
+  if (!candidate || !expected) return false;
+  const a = Buffer.from(String(candidate));
+  const b = Buffer.from(String(expected));
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function isPrivateClient(req) {
+  const ip = String(req.ip || req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
+  if (!ip) return false;
+  if (ip === '::1' || ip === '127.0.0.1' || ip === 'localhost') return true;
+  if (ip.startsWith('127.') || ip.startsWith('10.') || ip.startsWith('192.168.')) return true;
+  const m = ip.match(/^172\.(\d+)\./);
+  if (m) { const second = Number(m[1]); if (second >= 16 && second <= 31) return true; }
+  return /^(fc|fd)/i.test(ip);
+}
+
+function hasFleetToken(req) {
+  return !!FLEET_TOKEN && sameSecret(req.get('x-fleet-token'), FLEET_TOKEN);
+}
+
+// HTTP Basic auth check (used when PUBLIC_MODE is enabled)
 const BASIC_AUTH_USER = process.env.BASIC_AUTH_USER;
 const BASIC_AUTH_PASS = process.env.BASIC_AUTH_PASS;
-if (BASIC_AUTH_USER && BASIC_AUTH_PASS) {
+function basicAuthOk(req) {
+  if (!BASIC_AUTH_USER || !BASIC_AUTH_PASS) return false;
+  const header = req.headers.authorization || '';
+  const [scheme, encoded] = header.split(' ');
+  if (scheme !== 'Basic' || !encoded) return false;
+  const decoded = Buffer.from(encoded, 'base64').toString('utf8');
+  const idx = decoded.indexOf(':');
+  return idx > -1 && decoded.slice(0, idx) === BASIC_AUTH_USER && decoded.slice(idx + 1) === BASIC_AUTH_PASS;
+}
+
+// Rotating public link: only today's token (or its cookie) opens the app when PUBLIC_MODE is on.
+if (PUBLIC_MODE) {
   app.use((req, res, next) => {
-    const header = req.headers.authorization || '';
-    const [scheme, encoded] = header.split(' ');
-    if (scheme === 'Basic' && encoded) {
-      const decoded = Buffer.from(encoded, 'base64').toString('utf8');
-      const idx = decoded.indexOf(':');
-      if (idx > -1 && decoded.slice(0, idx) === BASIC_AUTH_USER && decoded.slice(idx + 1) === BASIC_AUTH_PASS) {
-        return next();
-      }
+    if (!activeLinkToken) return next();
+    if (req.path === '/api/fleet/join' || req.path === '/api/fleet/heartbeat' || req.path === '/api/fleet/run' || req.path.startsWith('/api/fleet/run/')) {
+      return next();
     }
-    res.setHeader('WWW-Authenticate', 'Basic realm="computera-ops", charset="UTF-8"');
-    res.status(401).send('Authentication required');
+    // The operator's Basic auth is the stable credential; it opens the app without a link.
+    if (basicAuthOk(req)) {
+      req.workspaceScope = 'full';
+      return next();
+    }
+    if (sameSecret(req.query.t, activeLinkToken)) {
+      res.setHeader('Set-Cookie', `cops_link=${encodeURIComponent(activeLinkToken)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`);
+      req.fleetLinkOk = true;
+      return next();
+    }
+    const cookies = String(req.headers.cookie || '').split(';').map(p => p.trim());
+    const linkCookie = cookies.find(p => p.startsWith('cops_link='));
+    if (linkCookie && sameSecret(decodeURIComponent(linkCookie.slice('cops_link='.length)), activeLinkToken)) {
+      req.fleetLinkOk = true;
+      return next();
+    }
+    res.status(401).type('html').send('<!doctype html><title>Link expired</title><p style="font-family:system-ui;padding:24px">This daily link is no longer valid. Ask the master node for today&rsquo;s link.</p>');
+  });
+
+  // Workspace sharing for people holding today's link: files, documents and the
+  // document helpers, always scoped to SHARED_FS_ROOT. Tool execution and anything
+  // outside the workspace still require the fleet token.
+  app.use(['/api/filesystem', '/api/document', '/api/memory', '/api/tools'], (req, res, next) => {
+    if (hasFleetToken(req) || basicAuthOk(req)) {
+      req.workspaceScope = 'full';
+      return next();
+    }
+    // req.path is relative to the mount, so compare against the mount base instead.
+    if (`${req.baseUrl}${req.path}`.startsWith('/api/tools')) {
+      return res.status(403).json({ error: 'Tool execution requires the fleet token' });
+    }
+    if (WORKSPACE_SHARE === 'off') {
+      return res.status(403).json({ error: 'Workspace sharing is disabled on this node' });
+    }
+    req.workspaceScope = WORKSPACE_SHARE === 'write' ? 'shared-write' : 'shared-read';
+    res.setHeader('Cache-Control', 'no-store');
+    return next();
   });
 }
 
@@ -60,6 +168,26 @@ app.use('/uploads', express.static(UPLOADS_DIR));
 // Ensure directories exist
 fs.ensureDirSync(MEMORY_DIR);
 fs.ensureDirSync(UPLOADS_DIR);
+
+// Worker nodes read the shared calendar and roster from the master, so the master
+// stays the only writer to the shared SQLite database.
+const MASTER_PROXY_PATHS = ['/api/tasks', '/api/calendar', '/api/fleet/workers', '/api/fleet/today', '/api/fleet/events', '/api/fleet/rotate', '/api/fleet/dispatch'];
+if (ROLE === 'worker' && MASTER_URL) {
+  app.use((req, res, next) => {
+    if (!MASTER_PROXY_PATHS.some(p => req.path === p || req.path.startsWith(p + '/'))) return next();
+    const init = {
+      method: req.method,
+      headers: { 'Content-Type': 'application/json', ...(FLEET_TOKEN ? { 'X-Fleet-Token': FLEET_TOKEN } : {}) },
+    };
+    if (!['GET', 'HEAD'].includes(req.method)) init.body = JSON.stringify(req.body ?? {});
+    fetch(`${MASTER_URL}${req.originalUrl}`, init)
+      .then(async (upstream) => {
+        const text = await upstream.text();
+        res.status(upstream.status).type(upstream.headers.get('content-type') || 'application/json').send(text);
+      })
+      .catch((err) => res.status(502).json({ error: `Master unreachable at ${MASTER_URL}: ${err.message}` }));
+  });
+}
 
 // Multer for file uploads - keeps the original extension so documents stay readable
 const upload = multer({
@@ -74,13 +202,34 @@ const upload = multer({
 });
 
 // Normalize path & check if allowed
-function isPathAllowed(filepath) {
+function isWithin(root, resolved) {
+  return resolved === root || resolved.startsWith(root + path.sep);
+}
+
+// Paths shared with link holders: inside SHARED_FS_ROOT, minus secrets/tooling/database.
+function isSharedPathAllowed(resolved) {
+  if (!isWithin(SHARED_FS_ROOT, resolved)) return false;
+  const rel = resolved.slice(SHARED_FS_ROOT.length).replace(/^[\\/]+/, '');
+  const segments = rel ? rel.split(/[\\/]+/) : [];
+  return !segments.some(seg => seg.startsWith('.') || SHARED_FS_DENY.has(seg));
+}
+
+// req.workspaceScope is set by the public-link gate: 'full' (fleet token / Basic auth),
+// 'shared-read' or 'shared-write' (holder of today's link).
+function isPathAllowed(filepath, req) {
   try {
     const resolved = path.resolve(filepath).toLowerCase();
-    return ALLOWED_FS_ROOTS.some(root => resolved === root || resolved.startsWith(root + path.sep));
+    const scope = req?.workspaceScope || 'full';
+    if (scope === 'shared-read' || scope === 'shared-write') return isSharedPathAllowed(resolved);
+    if (scope === 'none') return false;
+    return ALLOWED_FS_ROOTS.some(root => isWithin(root, resolved));
   } catch {
     return false;
   }
+}
+
+function canWriteWorkspace(req) {
+  return (req?.workspaceScope || 'full') !== 'shared-read';
 }
 
 function formatFileSize(bytes) {
@@ -222,10 +371,10 @@ const FS_TOOLS = [
 ];
 
 // Helper to execute filesystem tools
-async function executeTool(name, args) {
+async function executeTool(name, args, req) {
   if (name === 'list_directory') {
     const target = args.dirpath && args.dirpath !== '.' ? path.resolve(args.dirpath) : __dirname;
-    if (!isPathAllowed(target)) return { error: `Access denied to path: ${target}` };
+    if (!isPathAllowed(target, req)) return { error: `Access denied to path: ${target}` };
     const exists = await fs.pathExists(target);
     if (!exists) return { error: `Directory not found: ${target}` };
     const entries = await fs.readdir(target, { withFileTypes: true });
@@ -235,7 +384,7 @@ async function executeTool(name, args) {
 
   if (name === 'read_file') {
     const target = path.resolve(__dirname, args.filepath);
-    if (!isPathAllowed(target)) return { error: `Access denied to path: ${target}` };
+    if (!isPathAllowed(target, req)) return { error: `Access denied to path: ${target}` };
     const exists = await fs.pathExists(target);
     if (!exists) return { error: `File not found: ${target}` };
     const stat = await fs.stat(target);
@@ -246,14 +395,15 @@ async function executeTool(name, args) {
 
   if (name === 'write_file') {
     const target = path.resolve(__dirname, args.filepath);
-    if (!isPathAllowed(target)) return { error: `Access denied to path: ${target}` };
+    if (!isPathAllowed(target, req)) return { error: `Access denied to path: ${target}` };
+    if (!canWriteWorkspace(req)) return { error: 'This link has read-only workspace access' };
     await fs.outputFile(target, args.content || '');
     return { success: true, filepath: target, bytesWritten: (args.content || '').length };
   }
 
   if (name === 'read_document_text') {
     const target = path.resolve(__dirname, args.filepath);
-    if (!isPathAllowed(target)) return { error: `Access denied to path: ${target}` };
+    if (!isPathAllowed(target, req)) return { error: `Access denied to path: ${target}` };
     const exists = await fs.pathExists(target);
     if (!exists) return { error: `File not found: ${target}` };
     try {
@@ -266,7 +416,7 @@ async function executeTool(name, args) {
 
   if (name === 'edit_pdf') {
     const target = path.resolve(__dirname, args.filepath);
-    if (!isPathAllowed(target)) return { error: `Access denied to path: ${target}` };
+    if (!isPathAllowed(target, req)) return { error: `Access denied to path: ${target}` };
     const exists = await fs.pathExists(target);
     if (!exists) return { error: `File not found: ${target}` };
     try {
@@ -308,7 +458,7 @@ app.get('/api/health', async (req, res) => {
     const check = await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(2000) });
     if (check.ok) ollamaStatus = 'online';
   } catch { ollamaStatus = 'unreachable'; }
-  res.json({ status: 'ok', ollama: OLLAMA_URL, ollamaStatus, workspace: __dirname, platform: process.platform });
+  res.json({ status: 'ok', ollama: OLLAMA_URL, ollamaStatus, workspace: __dirname, platform: process.platform, povMode: POV_MODE });
 });
 
 // List Ollama models
@@ -325,16 +475,40 @@ app.get('/api/models', async (req, res) => {
 
 // Workspace info
 app.get('/api/filesystem/workspace', (req, res) => {
-  res.json({ cwd: __dirname, home: process.env.USERPROFILE || os.homedir(), allowedRoots: ALLOWED_FS_ROOTS });
+  const scope = req.workspaceScope || 'full';
+  const shared = scope === 'shared-read' || scope === 'shared-write';
+  if (shared) {
+    return res.json({ cwd: SHARED_FS_ROOT, root: SHARED_FS_ROOT, shared: true, writable: canWriteWorkspace(req), scope });
+  }
+  res.json({
+    cwd: __dirname,
+    home: process.env.USERPROFILE || os.homedir(),
+    allowedRoots: ALLOWED_FS_ROOTS,
+    shared: false,
+    writable: true,
+    scope,
+  });
 });
 
+// File metadata (used by Studio to notice on-disk edits, including the AI's)
+app.get('/api/filesystem/stat', async (req, res) => {
+  try {
+    const filepath = req.query.path;
+    if (!filepath) return res.status(400).json({ error: 'path query required' });
+    const target = path.resolve(filepath);
+    if (!isPathAllowed(target, req)) return res.status(403).json({ error: 'Access denied' });
+    if (!(await fs.pathExists(target))) return res.status(404).json({ error: 'File not found' });
+    const st = await fs.stat(target);
+    res.json({ path: target, size: st.size, mtimeMs: st.mtimeMs, isDirectory: st.isDirectory() });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
 // Read file
 app.post('/api/filesystem/read', async (req, res) => {
   try {
     const { filepath } = req.body;
     if (!filepath) return res.status(400).json({ error: 'filepath required' });
     const target = path.resolve(__dirname, filepath);
-    if (!isPathAllowed(target)) return res.status(403).json({ error: 'Access denied' });
+    if (!isPathAllowed(target, req)) return res.status(403).json({ error: 'Access denied' });
     const exists = await fs.pathExists(target);
     if (!exists) return res.status(404).json({ error: 'File not found' });
     const stat = await fs.stat(target);
@@ -350,7 +524,8 @@ app.post('/api/filesystem/write', async (req, res) => {
     const { filepath, content } = req.body;
     if (!filepath) return res.status(400).json({ error: 'filepath required' });
     const target = path.resolve(__dirname, filepath);
-    if (!isPathAllowed(target)) return res.status(403).json({ error: 'Access denied' });
+    if (!isPathAllowed(target, req)) return res.status(403).json({ error: 'Access denied' });
+    if (!canWriteWorkspace(req)) return res.status(403).json({ error: 'This link has read-only workspace access' });
     await fs.outputFile(target, content !== undefined ? content : '');
     const stat = await fs.stat(target);
     res.json({ success: true, filepath: target, size: stat.size, mtime: stat.mtime });
@@ -363,7 +538,8 @@ app.post('/api/filesystem/delete', async (req, res) => {
     const { filepath } = req.body;
     if (!filepath) return res.status(400).json({ error: 'filepath required' });
     const target = path.resolve(__dirname, filepath);
-    if (!isPathAllowed(target)) return res.status(403).json({ error: 'Access denied' });
+    if (!isPathAllowed(target, req)) return res.status(403).json({ error: 'Access denied' });
+    if (!canWriteWorkspace(req)) return res.status(403).json({ error: 'This link has read-only workspace access' });
     if (target === __dirname) return res.status(400).json({ error: 'Cannot delete project root' });
     await fs.remove(target);
     res.json({ success: true, filepath: target });
@@ -376,7 +552,8 @@ app.post('/api/filesystem/mkdir', async (req, res) => {
     const { dirpath } = req.body;
     if (!dirpath) return res.status(400).json({ error: 'dirpath required' });
     const target = path.resolve(__dirname, dirpath);
-    if (!isPathAllowed(target)) return res.status(403).json({ error: 'Access denied' });
+    if (!isPathAllowed(target, req)) return res.status(403).json({ error: 'Access denied' });
+    if (!canWriteWorkspace(req)) return res.status(403).json({ error: 'This link has read-only workspace access' });
     await fs.ensureDir(target);
     res.json({ success: true, dirpath: target });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -387,7 +564,7 @@ app.post('/api/filesystem/list', async (req, res) => {
   try {
     const { dirpath } = req.body;
     const target = dirpath ? path.resolve(__dirname, dirpath) : __dirname;
-    if (!isPathAllowed(target)) return res.status(403).json({ error: 'Access denied' });
+    if (!isPathAllowed(target, req)) return res.status(403).json({ error: 'Access denied' });
     const exists = await fs.pathExists(target);
     if (!exists) return res.status(404).json({ error: 'Directory not found' });
     const entries = await fs.readdir(target, { withFileTypes: true });
@@ -410,7 +587,7 @@ app.post('/api/document/read-text', async (req, res) => {
     const { filepath } = req.body;
     if (!filepath) return res.status(400).json({ error: 'filepath required' });
     const target = path.resolve(__dirname, filepath);
-    if (!isPathAllowed(target)) return res.status(403).json({ error: 'Access denied' });
+    if (!isPathAllowed(target, req)) return res.status(403).json({ error: 'Access denied' });
     const exists = await fs.pathExists(target);
     if (!exists) return res.status(404).json({ error: 'File not found' });
     const text = await extractDocumentText(target);
@@ -424,7 +601,7 @@ app.get('/api/document/view', async (req, res) => {
     const filepath = req.query.path;
     if (!filepath) return res.status(400).json({ error: 'path query required' });
     const target = path.resolve(filepath);
-    if (!isPathAllowed(target)) return res.status(403).json({ error: 'Access denied' });
+    if (!isPathAllowed(target, req)) return res.status(403).json({ error: 'Access denied' });
     if (!(await fs.pathExists(target))) return res.status(404).send('File not found');
     const ext = path.extname(target).toLowerCase();
     const mimeTypes = {
@@ -453,7 +630,7 @@ app.get('/api/document/pdf-bytes', async (req, res) => {
     const filepath = req.query.path;
     if (!filepath) return res.status(400).json({ error: 'path query required' });
     const target = path.resolve(filepath);
-    if (!isPathAllowed(target)) return res.status(403).json({ error: 'Access denied' });
+    if (!isPathAllowed(target, req)) return res.status(403).json({ error: 'Access denied' });
     if (!(await fs.pathExists(target))) return res.status(404).send('File not found');
     const ext = path.extname(target).toLowerCase();
     if (ext !== '.pdf') return res.status(400).json({ error: 'Not a PDF file' });
@@ -463,12 +640,39 @@ app.get('/api/document/pdf-bytes', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Save PDF bytes back (the POV bridge hands us the edited file)
+app.post('/api/document/save-bytes', express.raw({ type: 'application/octet-stream', limit: '100mb' }), async (req, res) => {
+  try {
+    const filepath = req.query.path;
+    if (!filepath) return res.status(400).json({ error: 'path query required' });
+    if (!canWriteWorkspace(req)) return res.status(403).json({ error: 'This link has read-only workspace access' });
+    const target = path.resolve(filepath);
+    if (!isPathAllowed(target, req)) return res.status(403).json({ error: 'Access denied' });
+    if (path.extname(target).toLowerCase() !== '.pdf') return res.status(400).json({ error: 'Only .pdf files can be saved here' });
+    if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: 'Empty body' });
+    if (req.body.subarray(0, 5).toString('latin1') !== '%PDF-') return res.status(400).json({ error: 'Body is not a PDF' });
+    if (!(await fs.pathExists(target))) return res.status(404).json({ error: 'File not found' });
+    const backupDir = path.join(__dirname, 'data', 'backups', 'pdf');
+    await fs.ensureDir(backupDir);
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    await fs.copy(target, path.join(backupDir, `${path.basename(target, '.pdf')}-${stamp}.pdf`));
+    const tmp = `${target}.${randomUUID()}.tmp`;
+    await fs.writeFile(tmp, req.body);
+    await fs.move(tmp, target, { overwrite: true });
+    const st = await fs.stat(target);
+    res.json({ success: true, path: target, size: st.size, mtimeMs: st.mtimeMs });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
 // Upload file
 app.post('/api/document/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     const target = path.resolve(req.file.path);
-    if (!isPathAllowed(target)) {
+    if (!canWriteWorkspace(req)) {
+      await fs.remove(target);
+      return res.status(403).json({ error: 'This link has read-only workspace access' });
+    }
+    if (!isPathAllowed(target, req)) {
       await fs.remove(target);
       return res.status(403).json({ error: 'Access denied' });
     }
@@ -483,7 +687,8 @@ app.post('/api/document/edit-pdf', async (req, res) => {
     if (!filepath) return res.status(400).json({ error: 'filepath required' });
     if (!text) return res.status(400).json({ error: 'text required' });
     const target = path.resolve(__dirname, filepath);
-    if (!isPathAllowed(target)) return res.status(403).json({ error: 'Access denied' });
+    if (!isPathAllowed(target, req)) return res.status(403).json({ error: 'Access denied' });
+    if (!canWriteWorkspace(req)) return res.status(403).json({ error: 'This link has read-only workspace access' });
     const exists = await fs.pathExists(target);
     if (!exists) return res.status(404).json({ error: 'File not found' });
     const existingPdfBytes = await fs.readFile(target);
@@ -567,6 +772,26 @@ CRITICAL INSTRUCTIONS - READ CAREFULLY:
 
     let effectiveSystem = system ? `${defaultSystem}\n\n${system}` : defaultSystem;
 
+    // Inject a compact workspace file listing so the model can "see" files
+    try {
+      const listTree = async (dir, depth, prefix = '') => {
+        if (depth < 0) return [];
+        const out = [];
+        const entries = await fs.readdir(dir, { withFileTypes: true });
+        for (const e of entries.slice(0, 80)) {
+          if (e.name.startsWith('.') || e.name === 'node_modules') continue;
+          const rel = prefix ? prefix + '/' + e.name : e.name;
+          out.push(rel + (e.isDirectory() ? '/' : ''));
+          if (e.isDirectory() && depth > 0) {
+            out.push(...await listTree(path.join(dir, e.name), depth - 1, rel));
+          }
+        }
+        return out;
+      };
+      const tree = await listTree(__dirname, 2);
+      effectiveSystem += `\n\n[Workspace files (depth 2, ${tree.length} entries)]:\n${tree.slice(0, 200).join('\n')}`;
+    } catch (e) { console.warn('workspace listing failed:', e.message); }
+
     // Inject active document context
     if (activeDocumentPath && await fs.pathExists(activeDocumentPath)) {
       try {
@@ -579,7 +804,26 @@ CRITICAL INSTRUCTIONS - READ CAREFULLY:
     if (req.body.options && typeof req.body.options === 'object') requestPayload.options = { ...requestPayload.options, ...req.body.options };
     if (enableTools && !stream) requestPayload.tools = FS_TOOLS;
 
-    const ollamaResponse = await fetch(`${OLLAMA_URL}/api/chat`, {
+    // Resolve tool calls up front when enabled, then stream the final answer.
+if (enableTools) {
+  const toolRes = await fetch(`${OLLAMA_URL}/api/chat`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, messages, system: effectiveSystem, stream: false, tools: FS_TOOLS, options: requestPayload.options })
+  });
+  if (toolRes.ok) {
+    const toolData = await toolRes.json();
+    if (toolData.message && Array.isArray(toolData.message.tool_calls) && toolData.message.tool_calls.length) {
+      const toolResults = [];
+      for (const tc of toolData.message.tool_calls) {
+        const result = await executeTool(tc.function.name, tc.function.arguments || {}, req);
+        toolResults.push({ role: 'tool', content: JSON.stringify(result) });
+      }
+      messages = [...messages, toolData.message, ...toolResults];
+    }
+  }
+}
+
+const ollamaResponse = await fetch(`${OLLAMA_URL}/api/chat`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestPayload)
     });
 
@@ -602,7 +846,7 @@ CRITICAL INSTRUCTIONS - READ CAREFULLY:
         for (const tc of toolCalls) {
           const name = tc.function.name;
           const args = tc.function.arguments || {};
-          const result = await executeTool(name, args);
+          const result = await executeTool(name, args, req);
           toolResults.push({ tool_call_id: tc.id || name, role: 'tool', content: JSON.stringify(result) });
         }
         const followUpMessages = [...messages, data.message, ...toolResults];
@@ -660,6 +904,17 @@ app.get('/api/kilo/models', async (req, res) => {
 
 const KILO_DIRECTORY = __dirname;
 
+// Kilo runs are owned by this process, not by the request that starts them: a
+// long task keeps going when the tab closes and is re-attached after a restart.
+const KILO_RUN_DIR = path.join(__dirname, 'data', 'kilo-runs');
+const kiloRuns = createKiloRuns({
+  kiloUrl: KILO_URL,
+  directory: KILO_DIRECTORY,
+  runDir: KILO_RUN_DIR,
+  maxDurationMs: Number(process.env.KILO_RUN_MAX_MS || 6 * 60 * 60 * 1000),
+  offlineGraceMs: Number(process.env.KILO_RUN_OFFLINE_MS || 15 * 60 * 1000),
+});
+
 function kiloModelRef(model) {
   if (!model || typeof model !== 'string') return undefined;
   const modelID = model.startsWith('kilo/') ? model.slice(5) : model;
@@ -679,6 +934,83 @@ function messageText(msg) {
   if (!msg) return '';
   const parts = msg.parts || msg.content || [];
   return parts.filter(p => p && p.type === 'text' && typeof p.text === 'string').map(p => p.text).join('');
+}
+
+// -------------------------------------------------------------
+// Fleet task execution (local engines)
+// -------------------------------------------------------------
+function buildTaskPrompt(task) {
+  return [
+    `Ops task: ${task.title}`,
+    task.description ? `Details:\n${task.description}` : '',
+    `Agent role: ${task.agent || 'master'} · Assignee: ${task.assignee || 'unassigned'}${task.due_date ? ' · Due: ' + task.due_date : ''}`,
+    'Work on this task now. Be concise and finish with a short summary of what you produced and any next step.',
+  ].filter(Boolean).join('\n\n');
+}
+
+// Fleet tasks share the run registry: a long task survives the fleet request
+// that started it, and completion comes from Kilo rather than a fixed timeout.
+async function runKiloTask(prompt, agent = 'master') {
+  const sessionRes = await fetch(`${KILO_URL}/session`, {
+    method: 'POST',
+    headers: kiloHeaders(),
+    body: JSON.stringify({ title: 'Fleet task', agent }),
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!sessionRes.ok) throw new Error(`Kilo session error (${sessionRes.status})`);
+  const session = await sessionRes.json();
+  if (!session.id) throw new Error('Kilo session id missing');
+  const { run } = await kiloRuns.start({
+    sessionId: session.id,
+    prompt,
+    agent,
+    model: process.env.FLEET_KILO_MODEL || undefined,
+  });
+  const budget = Number(process.env.KILO_TASK_TIMEOUT_MS || 30 * 60 * 1000);
+  const finished = await kiloRuns.waitFor(run.id, budget);
+  if (!finished.text.trim()) throw new Error('Kilo returned an empty answer');
+  return finished.text;
+}
+
+async function runOllamaTask(prompt) {
+  let model = process.env.FLEET_OLLAMA_MODEL || '';
+  if (!model) {
+    const tagsRes = await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(5000) });
+    if (!tagsRes.ok) throw new Error(`Ollama unavailable (${tagsRes.status})`);
+    const tags = await tagsRes.json();
+    model = (tags.models || [])[0]?.name || '';
+  }
+  if (!model) throw new Error('No Ollama model installed');
+  const res = await fetch(`${OLLAMA_URL}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], stream: false }),
+    signal: AbortSignal.timeout(170000),
+  });
+  if (!res.ok) throw new Error(`Ollama error (${res.status})`);
+  const data = await res.json();
+  return data.message?.content || '';
+}
+
+async function runTaskOnLocalEngine(task) {
+  const prompt = buildTaskPrompt(task);
+  const need = task.needs || 'any';
+  const caps = fleet.getCapabilities();
+  const engines = [];
+  if (need === 'kilo') engines.push('kilo');
+  else if (need === 'ollama') engines.push('ollama');
+  else {
+    if (caps.ollama) engines.push('ollama');
+    if (caps.kilo) engines.push('kilo');
+  }
+  let lastError = null;
+  for (const engine of engines) {
+    try {
+      const text = engine === 'kilo' ? await runKiloTask(prompt, task.agent || 'master') : await runOllamaTask(prompt);
+      return { ok: true, engine, text };
+    } catch (err) { lastError = err; }
+  }
+  return { ok: false, error: lastError?.message || `no local ${need} engine available` };
 }
 
 // Create Kilo session
@@ -735,53 +1067,26 @@ app.get('/api/kilo/session/:sessionId/messages', async (req, res) => {
   } catch (err) { res.status(502).json({ error: `Cannot reach Kilo: ${err.message}` }); }
 });
 
-// Send prompt to Kilo session (blocking)
+// Send prompt to Kilo session (blocking, but backed by the run registry so a
+// long task is waited on rather than abandoned after two minutes).
 app.post('/api/kilo/session/:sessionId/prompt', async (req, res) => {
   try {
     const { sessionId } = req.params;
     const prompt = typeof req.body.prompt === 'string' ? req.body.prompt : req.body.prompt?.text;
     if (!prompt) return res.status(400).json({ error: 'prompt required' });
-
-    // Use prompt_async for non-streaming prompt (Kilo's async API)
-    const resp = await fetch(`${KILO_URL}/session/${sessionId}/prompt_async`, {
-      method: 'POST',
-      headers: kiloHeaders(),
-      body: JSON.stringify({ parts: [{ type: 'text', text: prompt }], model: kiloModelRef(req.body.model), agent: req.body.agent }),
+    const { run } = await kiloRuns.start({ sessionId, prompt, model: req.body.model, agent: req.body.agent });
+    const budget = Number(process.env.KILO_RUN_WAIT_MS || 10 * 60 * 1000);
+    const finished = await kiloRuns.waitFor(run.id, budget);
+    res.json({
+      success: true, sessionId, runId: run.id,
+      model: finished.modelID, provider: finished.providerID, text: finished.text,
     });
-    if (!resp.ok) {
-      const errText = await resp.text();
-      return res.status(resp.status).json({ error: `Kilo error (${resp.status}): ${errText}` });
-    }
-    
-    // Poll for response (up to 120s for first token)
-    let attempts = 0;
-    let firstToken = false;
-    while (true) {
-      await new Promise(r => setTimeout(r, firstToken ? 500 : 1000));
-      attempts++;
-      const msgRes = await fetch(`${KILO_URL}/session/${sessionId}/message?${kiloDirectoryQuery()}`, {
-        headers: { 'x-kilo-directory': KILO_DIRECTORY }
-      });
-      if (!msgRes.ok) continue;
-      const messages = await msgRes.json();
-      if (!messages || !messages.length) continue;
-      const assistant = [...messages].reverse().find(m => m.info?.role === 'assistant' || m.role === 'assistant');
-      if (assistant) {
-        const textParts = assistant.parts?.filter(p => p.type === 'text' && p.text && p.text.trim())?.map(p => p.text) || [];
-        if (textParts.length > 0) {
-          if (!firstToken) firstToken = true;
-          const text = textParts.join('\n');
-          return res.json({ success: true, sessionId, model: assistant.info?.modelID, provider: assistant.info?.providerID, text });
-        }
-      }
-      if (!firstToken && attempts > 120) {
-        return res.status(504).json({ error: 'Kilo response timeout' });
-      }
-    }
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Send prompt to Kilo session (streams part deltas as newline-delimited JSON)
+// Send prompt to Kilo session (streams the run as newline-delimited JSON).
+// This is only a *view* over the run registry: closing this response detaches
+// the viewer, it does not stop the run.
 app.post('/api/kilo/session/:sessionId/prompt_stream', async (req, res) => {
   const { sessionId } = req.params;
   const prompt = typeof req.body.prompt === 'string' ? req.body.prompt : req.body.prompt?.text;
@@ -792,109 +1097,87 @@ app.post('/api/kilo/session/:sessionId/prompt_stream', async (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders?.();
 
-  const eventAbort = new AbortController();
   let closed = false;
-  res.on('close', () => { if (!res.writableEnded) { closed = true; } eventAbort.abort(); });
-
-  const forwardEvents = (async () => {
-    try {
-      const evResp = await fetch(`${KILO_URL}/event?${kiloDirectoryQuery()}`, {
-        headers: { Accept: 'text/event-stream' },
-        signal: eventAbort.signal,
-      });
-      if (!evResp.ok || !evResp.body) return;
-      const decoder = new TextDecoder();
-      let buffer = '';
-      const partTypes = new Map();
-      for await (const chunk of evResp.body) {
-        buffer += decoder.decode(chunk, { stream: true });
-        const frames = buffer.split('\n\n');
-        buffer = frames.pop();
-        for (const frame of frames) {
-          for (const line of frame.split('\n')) {
-            if (!line.startsWith('data:')) continue;
-            let evt;
-            try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
-            const props = evt?.properties || {};
-            if (props.sessionID !== sessionId) continue;
-            if (evt.type === 'message.part.updated' && props.part?.id) {
-              partTypes.set(props.part.id, props.part.type);
-            }
-            if (evt.type === 'message.part.delta' && props.field === 'text' && props.delta) {
-              if (partTypes.get(props.partID) !== 'text') continue;
-              if (!closed) res.write(JSON.stringify({ delta: props.delta }) + '\n');
-            }
-          }
-        }
-      }
-    } catch (err) {
-      if (!closed) console.warn('Kilo event stream ended:', err.message);
-    }
-  })();
+  let unsubscribe = null;
+  let heartbeat = null;
+  const safeWrite = (payload) => {
+    if (closed || res.writableEnded) return;
+    try { res.write(JSON.stringify(payload) + '\n'); } catch { closed = true; }
+  };
+  const cleanup = () => {
+    if (unsubscribe) { unsubscribe(); unsubscribe = null; }
+    if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
+  };
+  const end = () => {
+    cleanup();
+    if (!res.writableEnded) { try { res.end(); } catch { /* client gone */ } }
+  };
+  res.on('close', () => { closed = true; cleanup(); });
 
   try {
-    const resp = await fetch(`${KILO_URL}/session/${sessionId}/prompt_async`, {
-      method: 'POST',
-      headers: kiloHeaders(),
-      body: JSON.stringify({ parts: [{ type: 'text', text: prompt }], model: kiloModelRef(req.body.model), agent: req.body.agent }),
+    const { run } = await kiloRuns.start({
+      sessionId, prompt, model: req.body.model, agent: req.body.agent,
     });
-    if (!resp.ok) {
-      const errText = await resp.text();
-      if (!closed) res.write(JSON.stringify({ error: `Kilo error (${resp.status}): ${errText}` }) + '\n');
-    } else {
-      // Poll for response and stream text parts as they arrive
-      let attempts = 0;
-      let firstToken = false;
-      let lastTextLength = 0;
-      let stableCount = 0;
-      let streamedText = '';
-      while (true) {
-        await new Promise(r => setTimeout(r, firstToken ? 500 : 1000));
-        attempts++;
-        const msgRes = await fetch(`${KILO_URL}/session/${sessionId}/message?${kiloDirectoryQuery()}`, {
-          headers: { 'x-kilo-directory': KILO_DIRECTORY }
-        });
-        if (!msgRes.ok) continue;
-        const messages = await msgRes.json();
-        if (!messages || !messages.length) continue;
-const assistant = [...messages].reverse().find(m => m.info?.role === 'assistant' || m.role === 'assistant');
-          if (assistant) {
-            const textParts = assistant.parts?.filter(p => p.type === 'text' && p.text && p.text.trim())?.map(p => p.text) || [];
-            if (textParts.length > 0) {
-              if (!firstToken) firstToken = true;
-              const currentText = textParts.join('\n');
-if (currentText.length > lastTextLength) {
-              const delta = currentText.slice(lastTextLength);
-              if (!closed) res.write(JSON.stringify({ delta }) + '\n');
-              lastTextLength = currentText.length;
-              streamedText = currentText;
-              stableCount = 0;
-            } else if (currentText.length === lastTextLength) {
-              stableCount++;
-            }
-            if (firstToken && stableCount >= 2 && streamedText.length > 0) {
-              if (!closed) res.write(JSON.stringify({
-                done: true,
-                text: streamedText,
-                model: assistant.info?.modelID,
-                provider: assistant.info?.providerID,
-              }) + '\n');
-              break;
-            }
-            }
-          }
-        if (!firstToken && attempts > 120) {
-          if (!closed) res.write(JSON.stringify({ error: 'Kilo response timeout' }) + '\n');
-          break;
-        }
+    let sent = 0;
+    const flush = () => {
+      const current = kiloRuns.get(run.id);
+      if (!current) return;
+      if (current.text.length > sent) {
+        safeWrite({ delta: current.text.slice(sent) });
+        sent = current.text.length;
       }
-    }
+      if (current.status !== 'running') {
+        safeWrite({ done: true, text: current.text, model: current.modelID, provider: current.providerID });
+        end();
+      }
+    };
+    unsubscribe = kiloRuns.subscribe(flush);
+    heartbeat = setInterval(() => {
+      const current = kiloRuns.get(run.id);
+      if (!current) return;
+      safeWrite({ status: current.status, waiting: !!current.waiting, elapsedMs: Date.now() - (current.startedMs || Date.now()) });
+    }, 5000);
+    flush();
   } catch (err) {
-    if (!closed) res.write(JSON.stringify({ error: err.message }) + '\n');
-  } finally {
-    eventAbort.abort();
-    if (!closed) res.end();
+    safeWrite({ error: err.message });
+    end();
   }
+});
+
+// Start a Kilo run and answer immediately. The run continues server-side whether
+// or not this browser stays connected, and it is persisted for restart recovery.
+app.post('/api/kilo/session/:sessionId/run', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const prompt = typeof req.body.prompt === 'string' ? req.body.prompt : req.body.prompt?.text;
+    if (!prompt) return res.status(400).json({ error: 'prompt required' });
+    const { run, reused } = await kiloRuns.start({
+      sessionId, prompt, model: req.body.model, agent: req.body.agent,
+    });
+    res.json({ ...kiloRuns.snapshot(run, 0), runId: run.id, reused });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Read a run; ?offset=N returns only the text after that many characters, so a
+// poller never re-renders the whole answer.
+app.get('/api/kilo/run/:runId', (req, res) => {
+  const run = kiloRuns.get(req.params.runId);
+  if (!run) return res.status(404).json({ error: 'run not found' });
+  res.json({ ...kiloRuns.snapshot(run, Number(req.query.offset) || 0), runId: run.id });
+});
+
+// Stop a run but keep whatever text it already produced.
+app.post('/api/kilo/run/:runId/stop', (req, res) => {
+  const run = kiloRuns.stop(req.params.runId);
+  if (!run) return res.status(404).json({ error: 'run not found' });
+  res.json({ ...kiloRuns.snapshot(run, 0), runId: run.id });
+});
+
+// The run a session is working on right now — used to re-attach after a reload.
+app.get('/api/kilo/session/:sessionId/active-run', (req, res) => {
+  const run = kiloRuns.activeRun(req.params.sessionId);
+  if (!run) return res.json({ runId: null });
+  res.json({ ...kiloRuns.snapshot(run, 0), runId: run.id });
 });
 
 // Delete Kilo session
@@ -920,6 +1203,44 @@ function handleTaskError(res, err) {
   res.status(500).json({ error: err.message });
 }
 
+// -------------------------------------------------------------
+// Pages: Studio (chat + POV) is /, chat-only is /chat
+// -------------------------------------------------------------
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'studio.html')));
+app.get('/studio', (req, res) => res.sendFile(path.join(__dirname, 'public', 'studio.html')));
+app.get('/chat', (req, res) => res.sendFile(path.join(__dirname, 'public', 'chat.html')));
+
+// POV (pdfcraft) proxy: exactly the three published build files, cached on disk.
+// Same origin as the app so POV's ?host=parent bridge is usable.
+async function servePov(sub, res) {
+  if (!POV_ASSET_RE.test(sub)) return res.status(404).json({ error: 'Not found' });
+  const cacheFile = path.join(POV_CACHE_DIR, sub || 'index.html');
+  const type = sub === '' ? 'text/html; charset=utf-8' : sub.endsWith('.wasm') ? 'application/wasm' : 'application/javascript; charset=utf-8';
+  res.setHeader('Content-Type', type);
+  res.setHeader('Cache-Control', sub === '' ? 'public, max-age=600' : 'public, max-age=31536000, immutable');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  try {
+    if (await fs.pathExists(cacheFile)) {
+      const fresh = sub !== '' || Date.now() - (await fs.stat(cacheFile)).mtimeMs < 600000;
+      if (fresh) return res.sendFile(cacheFile);
+    }
+    const upstream = await fetch(POV_UPSTREAM + sub, { headers: { 'accept-encoding': 'identity' } });
+    if (!upstream.ok) return res.status(502).json({ error: `POV upstream responded ${upstream.status}` });
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    await fs.ensureDir(POV_CACHE_DIR);
+    await fs.writeFile(cacheFile, buf);
+    return res.send(buf);
+  } catch (err) {
+    if (await fs.pathExists(cacheFile).catch(() => false)) return res.sendFile(cacheFile);
+    return res.status(502).json({ error: `POV proxy failed: ${err.message}` });
+  }
+}
+app.get(['/pdfcraft', '/pdfcraft/'], (req, res) => {
+  if (req.path === '/pdfcraft') return res.redirect(302, '/pdfcraft/');
+  return servePov('', res);
+});
+app.get('/pdfcraft/*', (req, res) => servePov(String(req.params[0] || ''), res));
+
 app.get('/dashboard', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
 });
@@ -930,6 +1251,8 @@ app.get('/api/tasks', (req, res) => {
       status: req.query.status,
       assignee: req.query.assignee,
       agent: req.query.agent,
+      worker: req.query.worker,
+      needs: req.query.needs,
       from: req.query.from,
       to: req.query.to,
       q: req.query.q,
@@ -962,12 +1285,247 @@ app.post('/api/tools/execute', async (req, res) => {
   try {
     const { name, args } = req.body;
     if (!name) return res.status(400).json({ error: 'tool name required' });
-    const result = await executeTool(name, args || {});
+    const result = await executeTool(name, args || {}, req);
     res.json(result);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// -------------------------------------------------------------
+// Fleet API
+// -------------------------------------------------------------
+const fleet = createFleet({
+  store: {
+    upsertWorker, touchWorker, listWorkers, deleteWorker, getWorker,
+    countActiveByWorker, recordEvent, listEvents, getRotation, saveRotation,
+    getTask, updateTask,
+  },
+  token: FLEET_TOKEN,
+  hostUrl: SELF_URL,
+  selfId: SELF_ID,
+  selfName: SELF_NAME,
+  runLocalTask: runTaskOnLocalEngine,
+  onLinkToken: (token) => { activeLinkToken = token || null; },
+  staleMs: 45000,
+});
+
+const fleetHits = new Map();
+function fleetRateLimit(req, res, next) {
+  const key = String(req.ip || req.socket?.remoteAddress || 'unknown');
+  const now = Date.now();
+  const bucket = fleetHits.get(key) || { start: now, count: 0 };
+  if (now - bucket.start > 60000) { bucket.start = now; bucket.count = 0; }
+  bucket.count += 1;
+  fleetHits.set(key, bucket);
+  if (bucket.count > 240) return res.status(429).json({ error: 'Too many fleet requests' });
+  next();
+}
+
+// Machine-to-machine calls need the shared token once one is configured.
+function requireFleetTokenStrict(req, res, next) {
+  if (!FLEET_TOKEN) {
+    if (isPrivateClient(req)) return next();
+    return res.status(401).json({ error: 'FLEET_TOKEN is required for remote fleet calls' });
+  }
+  if (hasFleetToken(req)) return next();
+  return res.status(401).json({ error: 'Invalid fleet token' });
+}
+
+// Roster/calendar views plus the dashboard's own actions (dispatch, rotate) are
+// available to the local browser and to anyone already unlocked by today's link.
+function requireFleetRead(req, res, next) {
+  if (!FLEET_TOKEN || hasFleetToken(req) || isPrivateClient(req) || req.fleetLinkOk) return next();
+  return res.status(401).json({ error: 'Fleet token required' });
+}
+
+app.post('/api/fleet/join', fleetRateLimit, requireFleetTokenStrict, (req, res) => {
+  try { res.status(201).json({ ok: true, worker: fleet.join(req.body || {}) }); }
+  catch (err) { res.status(err.status || 400).json({ error: err.message }); }
+});
+
+app.post('/api/fleet/heartbeat', fleetRateLimit, requireFleetTokenStrict, (req, res) => {
+  try { res.json(fleet.heartbeat(req.body || {})); }
+  catch (err) { res.status(err.status || 400).json({ error: err.message }); }
+});
+
+app.get('/api/fleet/workers', fleetRateLimit, requireFleetRead, (req, res) => {
+  res.json({
+    role: ROLE,
+    self: { id: SELF_ID, name: SELF_NAME, base_url: SELF_URL, capabilities: fleet.getCapabilities() },
+    workers: fleet.roster(),
+    today: fleet.today(),
+  });
+});
+
+app.get('/api/fleet/events', fleetRateLimit, requireFleetRead, (req, res) => {
+  res.json({ events: fleet.events(req.query.limit) });
+});
+
+app.get('/api/fleet/today', fleetRateLimit, requireFleetRead, (req, res) => {
+  res.json({ today: fleet.today(), role: ROLE });
+});
+
+app.post('/api/fleet/rotate', fleetRateLimit, requireFleetRead, (req, res) => {
+  try { res.json({ today: fleet.today(), rotated: fleet.rotateNow() }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/fleet/workers/:id', fleetRateLimit, requireFleetTokenStrict, (req, res) => {
+  try {
+    const removed = fleet.removeWorker(req.params.id);
+    if (!removed) return res.status(404).json({ error: 'worker not found' });
+    res.json({ success: true, id: req.params.id });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Capability-aware dispatch: pick the least-loaded worker that can actually run the task.
+app.post('/api/fleet/dispatch/:taskId', fleetRateLimit, requireFleetRead, async (req, res) => {
+  try {
+    const outcome = await fleet.dispatch(req.params.taskId);
+    res.status(outcome.ok ? 200 : 409).json(outcome);
+  } catch (err) {
+    if (err instanceof TaskError) return handleTaskError(res, err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// Called by the master on the node that should run the task (its own local engines).
+app.post('/api/fleet/run/:taskId', fleetRateLimit, requireFleetTokenStrict, async (req, res) => {
+  try {
+    const task = req.body?.task || getTask(req.params.taskId);
+    if (!task) return res.status(404).json({ error: 'task not found' });
+    const result = await runTaskOnLocalEngine(task);
+    res.status(result.ok ? 200 : 502).json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Persisted node/exposure state plus live counts, so a restart keeps the same picture.
+app.get('/api/state', fleetRateLimit, requireFleetRead, (req, res) => {
+  try {
+    res.json({
+      role: ROLE,
+      self: { id: SELF_ID, name: SELF_NAME, base_url: SELF_URL },
+      settings: listSettings(),
+      today: fleet.today(),
+      counts: { tasks: listTasks({}).length, workers: fleet.roster().length },
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Shared calendar: day -> entries, plus who hosts each day.
+app.get('/api/calendar', fleetRateLimit, (req, res) => {
+  try {
+    const tasks = listTasks({
+      worker: req.query.worker,
+      needs: req.query.needs,
+      from: req.query.from,
+      to: req.query.to,
+      q: req.query.q,
+    });
+    const days = {};
+    for (const task of tasks) {
+      if (!task.due_date) continue;
+      (days[task.due_date] = days[task.due_date] || []).push(task);
+    }
+    const today = fleet.today();
+    res.json({ days, hosts: { [today.date]: today }, today, workers: fleet.roster() });
+  } catch (err) { handleTaskError(res, err); }
+});
+
+// Stable entry point: always send people to today's host.
+app.get('/today', (req, res) => {
+  if (ROLE === 'worker' && MASTER_URL) return res.redirect(302, `${MASTER_URL}/today`);
+  const info = fleet.today();
+  res.redirect(302, info.link || '/');
+});
+
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
+
+// -------------------------------------------------------------
+// Fleet boot
+// -------------------------------------------------------------
+fleet.registerSelf();
+probeCapabilities({ ollamaUrl: OLLAMA_URL, kiloUrl: KILO_URL })
+  .then((caps) => {
+    fleet.setCapabilities(caps);
+    fleet.registerSelf();
+    const label = [caps.kilo ? 'kilo' : null, caps.ollama ? `ollama (${caps.models.length} models)` : null]
+      .filter(Boolean).join(' + ') || 'no local engines';
+    console.log(`Fleet ${ROLE} as ${SELF_ID}: ${label}`);
+  })
+  .catch((err) => console.warn('Capability probe failed:', err.message));
+
+if (ROLE === 'master') {
+  const rotateTimer = setInterval(() => {
+    try { fleet.expireStale(); } catch (err) { console.warn('Rotation check failed:', err.message); }
+  }, 30000);
+  rotateTimer.unref?.();
+  const probeTimer = setInterval(() => {
+    probeCapabilities({ ollamaUrl: OLLAMA_URL, kiloUrl: KILO_URL })
+      .then((caps) => fleet.setCapabilities(caps))
+      .catch(() => {});
+  }, 60000);
+  probeTimer.unref?.();
+} else if (MASTER_URL) {
+  startWorkerHeartbeat({
+    masterUrl: MASTER_URL,
+    token: FLEET_TOKEN,
+    intervalMs: 15000,
+    info: async () => ({
+      id: SELF_ID,
+      name: SELF_NAME,
+      base_url: SELF_URL,
+      capabilities: { ...fleet.getCapabilities(), public_url: PUBLIC_URL },
+      max_concurrency: Number(process.env.MAX_CONCURRENCY || 1),
+    }),
+    onToday: (today) => { activeLinkToken = today?.is_host ? today.link_token : null; },
+    onError: (err) => console.warn('Fleet heartbeat failed:', err.message),
+  });
+  console.log(`Fleet worker ${SELF_ID} reporting to ${MASTER_URL}`);
+} else {
+  console.warn('NODE_ROLE=worker without MASTER_URL: running standalone');
+}
+
+// -------------------------------------------------------------
+// Persisted state
+// -------------------------------------------------------------
+// Exposure and identity settings live in the database so a restart (or another
+// node reading the master) can see how this machine is currently serving the team.
+try {
+  setSetting('role', ROLE);
+  setSetting('node', SELF_ID);
+  setSetting('public_url', PUBLIC_URL);
+  setSetting('public_mode', PUBLIC_MODE ? 'on' : 'off');
+  setSetting('pov_mode', POV_MODE);
+  setSetting('workspace_share', WORKSPACE_SHARE);
+  setSetting('shared_fs_root', SHARED_FS_ROOT);
+  setSetting('allowed_fs_roots', ALLOWED_FS_ROOTS.join(';'));
+  setSetting('last_boot', new Date().toISOString());
+} catch (err) {
+  console.warn('Could not persist fleet state:', err.message);
+}
+
+// Ensure Kilo serve is running; start it if needed.
+async function ensureKilo() {
+  try {
+    const r = await fetch(`${KILO_URL}/global/health`, { signal: AbortSignal.timeout(2000) });
+    if (r.ok) return;
+  } catch {}
+  try {
+    const exe = process.env.KILO_EXE || 'kilo';
+    spawn(exe, ['serve', '--port', '7777', '--hostname', '127.0.0.1'], { detached: true, stdio: 'ignore' }).unref();
+    console.log('Kilo: started kilo serve');
+  } catch (err) {
+    console.warn('Kilo: could not start kilo serve:', err.message);
+  }
+}
+ensureKilo();
+setInterval(ensureKilo, 30000);
+
+// Runs a previous process left mid-flight are re-attached here (crash restart):
+// Kilo keeps its own session state, so the answer is not lost.
+kiloRuns.restore()
+  .then((count) => { if (count) console.log(`Kilo: re-attached ${count} running task(s) after restart`); })
+  .catch((err) => console.warn('Kilo run restore failed:', err.message));
 
 const server = createServer(app);
 server.listen(PORT, '0.0.0.0', () => {
@@ -977,5 +1535,35 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`Ollama: ${OLLAMA_URL}`);
   console.log(`Workspace root: ${__dirname}`);
   console.log(`Kilo: ${KILO_URL}`);
+  console.log(`Fleet role: ${ROLE} as ${SELF_ID}${PUBLIC_MODE ? ' (public link mode)' : ''}`);
   console.log(`Uploads dir: ${UPLOADS_DIR}`);
+  console.log(`Workspace sharing: ${WORKSPACE_SHARE} (root ${SHARED_FS_ROOT})`);
+});
+
+let shuttingDown = false;
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`Received ${signal}, shutting down gracefully...`);
+  try { kiloRuns.close(); } catch {}
+  server.close(() => {
+    console.log('HTTP server closed');
+    process.exit(0);
+  });
+  setTimeout(() => {
+    console.log('Forced shutdown after timeout');
+    process.exit(1);
+  }, 10000);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
+// A long task must not take the whole app down with it: log the failure, keep
+// serving, and let the run registry report what happened on its next poll.
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception (process kept alive):', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled rejection (process kept alive):', reason);
 });

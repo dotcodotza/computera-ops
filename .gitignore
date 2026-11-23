@@ -8,11 +8,18 @@ Thumbs.db
 .env
 .env.local
 
+# Local tooling
+.tools/
+
 # Runtime artifacts
 uploads/
 test.pdf
 memory/*.json
 data/
+
+# PM2 process manager
+.pm2/
+logs/
 
 # Local workspace artifacts (may contain PII)
 marketing/
