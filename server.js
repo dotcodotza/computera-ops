@@ -1191,7 +1191,7 @@ async function runKiloTask(prompt, agent = 'master') {
   return finished.text;
 }
 
-async function runOllamaTask(prompt) {
+async function runOllamaTask(prompt, { onDelta } = {}) {
   let model = process.env.FLEET_OLLAMA_MODEL || '';
   if (!model) {
     const tagsRes = await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(5000) });
@@ -1200,18 +1200,47 @@ async function runOllamaTask(prompt) {
     model = (tags.models || [])[0]?.name || '';
   }
   if (!model) throw new Error('No Ollama model installed');
+  let full = '';
   const res = await fetch(`${OLLAMA_URL}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], stream: false }),
+    body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], stream: true }),
     signal: AbortSignal.timeout(170000),
   });
   if (!res.ok) throw new Error(`Ollama error (${res.status})`);
-  const data = await res.json();
-  return data.message?.content || '';
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const payload = line.slice(6);
+        if (payload === '[DONE]') continue;
+        try {
+          const chunk = JSON.parse(payload);
+          const content = chunk.message?.content || '';
+          if (content) {
+            full += content;
+            if (onDelta) onDelta(content);
+          }
+          if (chunk.done) break;
+        } catch { /* ignore malformed chunks */ }
+      }
+      if (full && res && typeof res.body === 'object') { /* keep reading */ }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return full;
 }
 
-async function runTaskOnLocalEngine(task) {
+async function runTaskOnLocalEngine(task, { onDelta } = {}) {
   const prompt = buildTaskPrompt(task);
   const need = task.needs || 'any';
   const caps = fleet.getCapabilities();
@@ -1249,7 +1278,7 @@ async function runTaskOnLocalEngine(task) {
         if (!finished.text.trim()) throw new Error('Kilo returned an empty answer');
         text = finished.text;
       } else {
-        text = await runOllamaTask(prompt);
+        text = await runOllamaTask(prompt, { onDelta });
       }
       return { ok: true, engine, text };
     } catch (err) { lastError = err; }
@@ -1439,6 +1468,84 @@ app.get('/api/kilo/run/:runId/stream', (req, res) => {
   const end = () => { clearInterval(heartbeat); unsub(); try { res.end(); } catch {} };
   res.on('close', () => end());
   flush();
+});
+
+// Stream live Ollama chat output via SSE. Body: { model?, prompt, stream?: true }
+// Each SSE data frame contains { delta, done, text, model }.
+app.post('/api/ollama/chat/stream', async (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+
+  let model = process.env.FLEET_OLLAMA_MODEL || '';
+  if (!model) {
+    try {
+      const tagsRes = await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(5000) });
+      const tags = await tagsRes.json();
+      model = (tags.models || [])[0]?.name || '';
+    } catch { /* fall through to error below */ }
+  }
+  if (!model) {
+    res.write(`event: error\ndata: ${JSON.stringify({ error: 'No Ollama model installed' })}\n\n`);
+    return res.end();
+  }
+
+  const { prompt } = req.body || {};
+  if (!prompt) {
+    res.write(`event: error\ndata: ${JSON.stringify({ error: 'prompt required' })}\n\n`);
+    return res.end();
+  }
+
+  let sent = 0;
+  const safeWrite = (data) => {
+    try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch { /* client gone */ }
+  };
+
+  try {
+    let full = '';
+    const res2 = await fetch(`${OLLAMA_URL}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], stream: true }),
+      signal: AbortSignal.timeout(170000),
+    });
+    if (!res2.ok) throw new Error(`Ollama error (${res2.status})`);
+    const reader = res2.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const payload = line.slice(6);
+          if (payload === '[DONE]') continue;
+          try {
+            const chunk = JSON.parse(payload);
+            const content = chunk.message?.content || '';
+            if (content) {
+              full += content;
+              safeWrite({ delta: content, offset: full.length });
+            }
+            if (chunk.done) break;
+          } catch { /* ignore malformed chunks */ }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    safeWrite({ done: true, text: full, model });
+  } catch (err) {
+    safeWrite({ error: err.message });
+  } finally {
+    res.end();
+  }
 });
 
 // Stop a run but keep whatever text it already produced.
@@ -1734,7 +1841,8 @@ async function runSprintStep(step, sprint, context = {}) {
 
   if (step.task_id) {
     try {
-      updateTask(step.task_id, { description: prompt, status: 'in_progress', blocked_reason: null, needs });
+      const task = getTask(step.task_id);
+      updateTask(step.task_id, { description: prompt, status: 'in_progress', blocked_reason: null, needs: task?.needs || 'any' });
     } catch (err) {
       return { ok: false, error: 'could not prepare the step task: ' + err.message };
     }
@@ -1752,9 +1860,27 @@ async function runSprintStep(step, sprint, context = {}) {
     description: prompt,
     agent: step.role,
     needs,
-  });
+  }, { onDelta: context.onDelta });
   return local.ok ? { ok: true, text: local.text } : { ok: false, error: local.error };
 }
+
+// Wrap runSprintStep so live Ollama/Kilo output is stored on the step as it
+// streams, letting the SSE stream surface it without waiting for completion.
+const runSprintStepWithStream = async (step, sprint, context = {}) => {
+  let liveText = '';
+  const result = await runSprintStep(step, sprint, {
+    ...context,
+    onDelta: (delta) => {
+      liveText += delta;
+      try {
+        if (step.task_id) {
+          updateTask(step.task_id, { result: liveText, last_run_at: new Date().toISOString() });
+        }
+      } catch { /* best effort */ }
+    },
+  });
+  return result;
+};
 
 const sprints = createSprints({
   store: {
@@ -1763,7 +1889,7 @@ const sprints = createSprints({
     addSprintFeed, listSprintFeed, resetInterruptedSprints,
     createTask, getTask, updateTask,
   },
-  runStep: runSprintStep,
+  runStep: runSprintStepWithStream,
   maxParallel: Math.max(1, Math.min(Number(process.env.SPRINT_PARALLEL || 3) || 3, 4)),
 });
 
