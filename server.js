@@ -1802,6 +1802,27 @@ for (const action of ['start', 'resume', 'pause', 'stop']) {
   });
 }
 
+app.get('/api/sprints/:id/stream', fleetRateLimit, requireFleetRead, (req, res) => {
+  const sprint = getSprint(req.params.id);
+  if (!sprint) return res.status(404).json({ error: 'sprint not found' });
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+  let last = '';
+  const timer = setInterval(() => {
+    try {
+      const s = getSprint(req.params.id);
+      if (!s) { res.write('event: close\ndata: {}\n\n'); clearInterval(timer); res.end(); return; }
+      const snap = JSON.stringify({ status: s.status, steps: s.steps.map(x => ({ id: x.id, stage: x.stage, status: x.status, output: x.output, error: x.error })) });
+      if (snap !== last) { last = snap; res.write(`data: ${snap}\n\n`); }
+      if (s.status === 'done' || s.status === 'stopped' || s.status === 'cancelled') { res.write('event: close\ndata: {}\n\n'); clearInterval(timer); res.end(); }
+    } catch (err) { res.write(`event: error\ndata: ${JSON.stringify({ error: err.message })}\n\n`); }
+  }, 1500);
+  req.on('close', () => clearInterval(timer));
+});
+
 app.get('/api/sprints/:id/feed', fleetRateLimit, requireFleetRead, (req, res) => {
   try {
     const sprint = getSprint(req.params.id);
