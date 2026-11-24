@@ -49,7 +49,7 @@ const ROLE = String(process.env.NODE_ROLE || 'master').toLowerCase() === 'worker
 const MASTER_URL = String(process.env.MASTER_URL || '').replace(/\/+$/, '');
 const FLEET_TOKEN = String(process.env.FLEET_TOKEN || '');
 const PUBLIC_MODE = ['1', 'true', 'yes', 'on'].includes(String(process.env.PUBLIC_MODE || '').toLowerCase());
-const PUBLIC_URL = String(process.env.PUBLIC_URL || '').replace(/\/+$/, '');
+let PUBLIC_URL = String(process.env.PUBLIC_URL || '').replace(/\/+$/, '');
 
 // POV (pdfcraft) is proxied under our own origin so its same-origin postMessage
 // bridge works: the workspace PDF goes in, saves come back into the workspace.
@@ -62,7 +62,7 @@ const SELF_ID = ROLE === 'worker'
   ? String(process.env.WORKER_ID || `${os.hostname().toLowerCase().replace(/[^a-z0-9-]/g, '-')}-${PORT}`)
   : 'master';
 const SELF_NAME = String(process.env.WORKER_NAME || (ROLE === 'worker' ? os.hostname() : 'masternode'));
-const SELF_URL = PUBLIC_URL || `http://localhost:${PORT}`;
+let SELF_URL = PUBLIC_URL || `http://localhost:${PORT}`;
 let activeLinkToken = String(process.env.HOST_LINK_TOKEN || '') || null;
 const MEMORY_DIR = path.join(__dirname, 'memory');
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
@@ -165,6 +165,13 @@ if (PUBLIC_MODE) {
     // Sitting at this machine is itself authorization: cloudflared connects from
     // loopback too, so a real tunnel request is recognised by its Host header.
     if (isLoopbackHost(req)) {
+      req.workspaceScope = 'full';
+      return next();
+    }
+    // The fleet token is the machine credential. A worker that presents it proxies
+    // the roster, calendar and sprint routes to this master; without this branch the
+    // gate answered those with "Link expired" and the worker UI looked broken.
+    if (hasFleetToken(req)) {
       req.workspaceScope = 'full';
       return next();
     }
@@ -1858,6 +1865,31 @@ app.get('/today', (req, res) => {
   res.redirect(302, info.link || '/dashboard');
 });
 
+// Worker onboarding: serves a bootstrap script that writes .env and starts npm start.
+// Token must match FLEET_TOKEN (or today's link token) to prevent open enrollment.
+app.get('/join/:token', (req, res) => {
+  const supplied = String(req.params.token || '');
+  const ok = (FLEET_TOKEN && sameSecret(supplied, FLEET_TOKEN)) || sameSecret(supplied, activeLinkToken);
+  if (!ok) return res.status(401).type('text/plain').send('invalid or expired token');
+  const master = PUBLIC_URL || `http://localhost:${PORT}`;
+  const script = `#!/usr/bin/env bash
+set -e
+MASTER_URL="${master}"
+FLEET_TOKEN="${supplied}"
+cat > .env <<EOF
+NODE_ROLE=worker
+MASTER_URL=\${MASTER_URL}
+FLEET_TOKEN=\${FLEET_TOKEN}
+KILO_URL=http://127.0.0.1:7777
+OLLAMA_URL=http://127.0.0.1:11434
+# Set PUBLIC_URL to a reachable address (tunnel or LAN IP) before starting,
+# otherwise this worker registers as relay_only and will not receive tasks.
+EOF
+echo "Wrote .env. Set PUBLIC_URL, then run: npm install && npm start"
+`;
+  res.type('text/plain').send(script);
+});
+
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 
 // -------------------------------------------------------------
@@ -1867,7 +1899,33 @@ fleet.registerSelf();
 probeCapabilities({ ollamaUrl: OLLAMA_URL, kiloUrl: KILO_URL })
   .then((caps) => {
     fleet.setCapabilities(caps);
-    fleet.registerSelf();
+// Auto-tunnel: if no PUBLIC_URL, spawn cloudflared and adopt its URL.
+const CLOUDFLARED = process.env.CLOUDFLARED_BIN || 'C:\\Users\\molel\\tools\\cloudflared.exe';
+if (ROLE === 'worker' && !PUBLIC_URL) {
+  (async () => {
+    try {
+      const { spawn } = await import('child_process');
+      const cf = spawn(CLOUDFLARED, ['tunnel', '--url', `http://localhost:${PORT}`, '--http-host-header', `localhost:${PORT}`], { stdio: ['ignore', 'pipe', 'pipe'] });
+      const capture = (chunk) => {
+        const m = String(chunk).match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+        if (m && !PUBLIC_URL) {
+          PUBLIC_URL = m[0];
+          SELF_URL = PUBLIC_URL;
+          console.log('Auto-tunnel URL:', PUBLIC_URL);
+          try { fleet.registerSelf(); } catch {}
+        }
+      };
+      cf.stdout.on('data', capture);
+      cf.stderr.on('data', capture);
+      cf.on('exit', (code) => console.warn('cloudflared exited:', code));
+      console.log('Auto-tunnel starting...');
+    } catch (err) {
+      console.warn('Auto-tunnel failed to start:', err.message);
+    }
+  })();
+}
+
+fleet.registerSelf();
     const label = [caps.kilo ? 'kilo' : null, caps.ollama ? `ollama (${caps.models.length} models)` : null]
       .filter(Boolean).join(' + ') || 'no local engines';
     console.log(`Fleet ${ROLE} as ${SELF_ID}: ${label}`);
@@ -1888,6 +1946,7 @@ if (ROLE === 'master') {
   }, 5000);
   sprintTimer.unref?.();
 } else if (MASTER_URL) {
+  if (!PUBLIC_URL) console.warn('Fleet worker has no PUBLIC_URL: registering as relay_only (not dispatchable). Set PUBLIC_URL to a reachable address.');
   startWorkerHeartbeat({
     masterUrl: MASTER_URL,
     token: FLEET_TOKEN,
@@ -1896,7 +1955,7 @@ if (ROLE === 'master') {
       id: SELF_ID,
       name: SELF_NAME,
       base_url: SELF_URL,
-      capabilities: { ...fleet.getCapabilities(), public_url: PUBLIC_URL },
+      capabilities: { ...fleet.getCapabilities(), public_url: PUBLIC_URL, relay_only: !PUBLIC_URL },
       max_concurrency: Number(process.env.MAX_CONCURRENCY || 1),
     }),
     onToday: (today) => { activeLinkToken = today?.is_host ? today.link_token : null; },

@@ -282,7 +282,7 @@ export function createFleet(options = {}) {
 
     const need = task.needs || 'any';
     const load = store.countActiveByWorker();
-    const allCandidates = roster().filter(w => w.id !== selfId && capable(w, need));
+    const allCandidates = roster().filter(w => w.id !== selfId && capable(w, need) && !((w.capabilities || {}).relay_only));
     const cooling = allCandidates.filter(w => circuitOpen(w.id));
     if (cooling.length) {
       store.recordEvent(
