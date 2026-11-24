@@ -6,10 +6,14 @@
 
 #pov-panel { flex: 1 1 auto; display: flex; flex-direction: column; background: var(--bg-dark); min-width: 0; min-height: 0; border-left: 1px solid var(--border); }
 
-#pov-header { padding: 8px 12px; background: var(--bg-surface); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
-#pov-doc-title { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 1; min-width: 0; }
-#pov-status { font-size: 11px; color: var(--text-dim); font-family: 'JetBrains Mono', monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; text-align: right; }
+#pov-header { padding: 8px 12px; background: var(--bg-surface); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.pov-title { display: flex; align-items: center; gap: 9px; min-width: 0; flex: 1 1 auto; }
+.pov-badge { flex: 0 0 auto; width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center; font-size: 13px; background: rgba(124, 108, 255, 0.14); border: 1px solid rgba(124, 108, 255, 0.3); }
+.pov-meta { min-width: 0; }
+#pov-doc-title { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#pov-status { font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
 #pov-status.bad { color: var(--danger); }
+.doc-actions { display: flex; gap: 6px; align-items: center; flex: 0 0 auto; }
 
 #pov-frame { flex: 1; width: 100%; border: none; display: block; background: #19191c; min-height: 0; }
 
@@ -21,8 +25,6 @@ body.resizing iframe { pointer-events: none; }
 .pov-banner { display: none; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 12px; background: rgba(245, 158, 11, 0.1); border-bottom: 1px solid rgba(245, 158, 11, 0.3); color: var(--warning); font-size: 12px; }
 .pov-banner.active { display: flex; }
 .pov-banner .actions { display: flex; gap: 6px; flex-shrink: 0; }
-
-.pov-hint { padding: 6px 12px; background: var(--bg-panel); border-top: 1px solid var(--border); color: var(--text-dim); font-size: 11px; }
 
 body.pov-max #chat-copilot-panel, body.pov-max #split-handle { display: none; }
 body.pov-max #pov-panel { border-left: none; }

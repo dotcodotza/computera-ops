@@ -28,6 +28,28 @@
   let readyTimer = null;
   let pollTimer = null;
   let current = { path: null, name: null, mtimeMs: 0, size: 0 };
+  const IDLE_STATUS = 'Open a PDF from Files, or drop one in.';
+
+  /* POV (egui) keeps its appearance in localStorage, and this app is same-origin,
+     so its bright workbench can be matched to the dark shell before the canvas
+     boots. A deliberate light choice is left alone; only the follow-the-system
+     default becomes dark. */
+  function seedPovTheme() {
+    try {
+      const raw = localStorage.getItem('pov');
+      if (raw) {
+        const settings = JSON.parse(raw);
+        if (!settings.theme || settings.theme === 'System') {
+          settings.theme = 'Dark';
+          localStorage.setItem('pov', JSON.stringify(settings));
+        }
+      }
+      const memory = localStorage.getItem('egui_memory_ron');
+      if (memory && /theme_preference:System/.test(memory)) {
+        localStorage.setItem('egui_memory_ron', memory.replace(/theme_preference:[A-Za-z]+/, 'theme_preference:Dark'));
+      }
+    } catch { /* a corrupt or missing setting is POV's to reset */ }
+  }
 
   const basename = (p) => (window.Copilot ? window.Copilot.baseName(p) : String(p).split(/[\\/]/).pop());
   const toast = (msg, err) => { if (window.Copilot) window.Copilot.toast(msg, err); };
@@ -44,7 +66,7 @@
   }
 
   function setTitle(name) {
-    titleEl.textContent = name || 'No document';
+    titleEl.textContent = name || 'No PDF open';
     document.title = (name ? name + ' · ' : '') + 'Studio · Computera';
   }
 
@@ -88,7 +110,7 @@
       const bytes = await res.arrayBuffer();
       await statNow(current.path);
       pushOpen(bytes, current.name);
-      setStatus(current.name + ' · ' + formatSize(bytes.byteLength));
+      setStatus(formatSize(bytes.byteLength) + ' · saves to this file');
       if (showToast) toast('Sent to POV');
     } catch (err) {
       setStatus('Could not load: ' + err.message, true);
@@ -222,10 +244,11 @@
       dirty = false;
       pendingOpen = null;
       setTitle(null);
-      setStatus('');
+      setStatus(IDLE_STATUS);
       hideBanner();
       if (mode === 'proxy') {
         ready = false;
+        seedPovTheme();
         frame.src = povUrl();
         startReadyTimer();
       }
@@ -360,6 +383,7 @@
       frame.src = POV_EMBED;
       setStatus('Embedded POV from github.io — no save-back to the workspace', true);
     } else {
+      seedPovTheme();
       frame.src = povUrl();
       startReadyTimer();
     }

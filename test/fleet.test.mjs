@@ -93,6 +93,37 @@ test('createFleet with in-memory store', () => {
   assert.ok(events.some(e => e.kind === 'leave'));
 });
 
+test('today follows this node\'s current public url without rotating the token', () => {
+  const rotations = {
+    [todayKey()]: {
+      date: todayKey(),
+      worker_id: 'master',
+      host_url: 'http://localhost:3000',
+      link_token: 'tok-123',
+      assigned_at: new Date().toISOString(),
+    },
+  };
+  const store = {
+    upsertWorker(input) { return { ...input, status: 'online', created_at: new Date().toISOString() }; },
+    touchWorker() { return null; },
+    listWorkers() {
+      return [{ id: 'master', name: 'masternode', base_url: 'https://new-tunnel.example', status: 'online', capabilities: {}, created_at: new Date().toISOString() }];
+    },
+    recordEvent() {},
+    getRotation(date) { return rotations[date] || null; },
+    saveRotation({ date, worker_id, host_url, link_token }) {
+      rotations[date] = { date, worker_id, host_url, link_token, assigned_at: new Date().toISOString() };
+      return rotations[date];
+    },
+  };
+
+  const fleet = createFleet({ store, selfId: 'master', selfName: 'masternode', hostUrl: 'https://new-tunnel.example' });
+  const today = fleet.today();
+  assert.ok(today.link.startsWith('https://new-tunnel.example/dashboard'), 'the link lands on the ops dashboard');
+  assert.ok(today.link.endsWith('?t=' + today.link_token), 'the link carries today\'s token or it would 401');
+  assert.equal(today.link_token, 'tok-123', 'the daily token must not rotate just because the url changed');
+});
+
 test('createFleet getCapabilities returns defaults', () => {
   const fleet = createFleet({
     store: {

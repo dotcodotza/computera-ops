@@ -251,6 +251,26 @@
 .response-popup.collapsed .response-popup-body { display: none; }
 .response-popup.collapsed { max-height: none; }
 
+/* One pop-up per session: the whole exchange scrolls inside it. */
+.session-popup { max-height: min(72vh, 640px); }
+.session-popup .popup-title { font-family: inherit; font-size: 12px; }
+.popup-stream { overflow-y: auto; min-height: 0; }
+.popup-turn { border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
+.popup-turn:last-child { border-bottom: none; }
+.popup-turn-meta {
+  padding: 10px 16px 0; font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text-dim); font-family: 'JetBrains Mono', monospace;
+}
+.popup-turn .message-content { padding-top: 6px; }
+.popup-divider { height: 1px; margin: 0 16px; background: rgba(255, 255, 255, 0.06); }
+.popup-restore { position: fixed; right: 20px; bottom: 104px; z-index: 60; box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5); }
+.tool-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 16px 0; }
+.tool-chip {
+  font-size: 10.5px; padding: 3px 7px; border-radius: 6px; font-family: 'JetBrains Mono', monospace;
+  background: rgba(124, 108, 255, 0.12); border: 1px solid rgba(124, 108, 255, 0.3); color: #c7bfff;
+}
+.tool-chip.bad { background: rgba(239, 68, 68, 0.12); border-color: rgba(239, 68, 68, 0.35); color: #fca5a5; }
+
 @media (max-width: 720px) {
   .response-popup { max-height: 58vh; border-radius: 12px; }
   .input-section { padding: 10px 12px 14px; }

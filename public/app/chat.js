@@ -241,13 +241,12 @@
       let accumulated = opts.initialText || '';
       let offset = opts.offset || 0;
       let polling = false;
-      const titleEl = panel.row.querySelector ? panel.row.querySelector('.popup-title') : null;
+      const titleEl = panel.meta || null;
       const startedAt = Date.now() - (opts.elapsedMs || 0);
 
       const paint = () => {
         panel.content.innerHTML = renderMarkdown(accumulated);
-        const c = document.getElementById('messages-container');
-        if (c) c.scrollTop = c.scrollHeight;
+        scrollPopupToEnd();
       };
 
       const finish = (data) => {
@@ -289,13 +288,13 @@
           const data = await res.json();
           if (data.text) { accumulated += data.text; paint(); }
           if (typeof data.offset === 'number') offset = data.offset;
-          if (data.modelID && titleEl) titleEl.textContent = '⚡ Kilo · ' + data.modelID;
+          if (data.modelID && titleEl) titleEl.textContent = 'Kilo · ' + data.modelID;
           if (data.status !== 'running') { finish(data); return true; }
-          if (data.waiting && titleEl) titleEl.textContent = '⚡ Kilo · reconnecting…';
+          if (data.waiting && titleEl) titleEl.textContent = 'Kilo · reconnecting…';
         } catch (err) {
           // A failed poll is not a failed run: the server keeps working and the
           // run state is the truth, so just keep watching.
-          if (titleEl) titleEl.textContent = '⚡ Kilo · waiting for server…';
+          if (titleEl) titleEl.textContent = 'Kilo · waiting for server…';
         } finally { polling = false; }
         return false;
       };
@@ -309,7 +308,7 @@
         if (!titleEl || !currentKiloRunId) return;
         const secs = Math.round((Date.now() - startedAt) / 1000);
         const label = secs < 60 ? secs + 's' : Math.floor(secs / 60) + 'm ' + (secs % 60) + 's';
-        titleEl.textContent = `⚡ Kilo · working ${label}`;
+        titleEl.textContent = `Kilo · working ${label}`;
       }, 1000);
 
       tick().then((done) => {
@@ -330,9 +329,10 @@
         if (!data.runId || data.status !== 'running') return false;
 
         // The in-flight answer is already in Kilo's history; drop that rendered
-        // copy so the live pop-up is the only one.
-        const lastPopup = document.querySelector('#messages-list .response-popup:last-child');
-        if (lastPopup && data.text && (lastPopup.textContent || '').includes(data.text.slice(0, 40))) lastPopup.remove();
+        // copy so the live turn is the only one.
+        const turns = sessionPopup ? sessionPopup.querySelectorAll('.popup-turn') : [];
+        const lastTurn = turns[turns.length - 1];
+        if (lastTurn && data.text && (lastTurn.textContent || '').includes(data.text.slice(0, 40))) lastTurn.remove();
 
         const session = getCurrentSession();
         const assistantMsg = {
@@ -381,9 +381,11 @@
       saveSessionsToStorage(); appendMessageElement(userMsg);
 
       const assistantMsg = { role: 'assistant', content: '', model: 'kilo · ' + kiloAgent };
+      session.messages.push(assistantMsg);
+      saveSessionsToStorage();
       const panel = appendMessageElement(assistantMsg);
-      const titleEl = panel.row.querySelector ? panel.row.querySelector('.popup-title') : null;
-      if (titleEl) titleEl.textContent = '⚡ Kilo · starting…';
+      const titleEl = panel.meta || null;
+      if (titleEl) titleEl.textContent = 'Kilo · starting…';
 
       try {
         const res = await fetch(`/api/kilo/session/${encodeURIComponent(currentKiloSessionId)}/run`, {
@@ -569,10 +571,32 @@
       activeDocumentPath = filepath || null;
       const indicator = document.getElementById('active-doc-indicator');
       const nameEl = document.getElementById('active-doc-name');
-      if (!indicator || !nameEl) return;
-      if (!activeDocumentPath) { indicator.style.display = 'none'; return; }
-      nameEl.textContent = label || pathBasename(activeDocumentPath);
-      indicator.style.display = 'flex';
+      if (indicator && nameEl) {
+        if (activeDocumentPath) {
+          nameEl.textContent = label || pathBasename(activeDocumentPath);
+          indicator.style.display = 'flex';
+        } else {
+          indicator.style.display = 'none';
+        }
+      }
+      syncDocumentChrome();
+    }
+
+    // Studio only: the pane header and the empty state should name the document
+    // that is actually open, instead of still asking for one.
+    function syncDocumentChrome() {
+      if (!document.getElementById('pov-frame')) return;
+      const name = activeDocumentPath ? pathBasename(activeDocumentPath) : null;
+      const subtitle = document.getElementById('copilot-subtitle');
+      const welcomeTitle = document.querySelector('#welcome-screen .welcome-title');
+      const welcomeDesc = document.querySelector('#welcome-screen .welcome-desc');
+      if (subtitle) subtitle.textContent = name ? 'On ' + name : 'Document-aware';
+      if (welcomeTitle) welcomeTitle.textContent = name || 'Document Co-Pilot';
+      if (welcomeDesc) {
+        welcomeDesc.textContent = name
+          ? 'Ask about this document, or say what to change — POV reloads when the file changes on disk.'
+          : 'Open a PDF from the Files tab and it loads into POV. Ask about it here, or let the AI edit the file — POV reloads when it changes on disk.';
+      }
     }
 
     async function openDocument(filepath, type = null) {
@@ -712,10 +736,13 @@
       const userMsg = { role: 'user', content: text || 'Inspect attached files', attachments: currentAttachments };
       session.messages.push(userMsg);
       if (session.messages.length === 1) session.title = (text || currentAttachments[0]?.name || 'Chat').slice(0, 28);
+      refreshPopupTitle();
       input.value = ''; attachedFiles = []; renderAttachmentsBar(); autoResizeTextarea(input);
       saveSessionsToStorage(); appendMessageElement(userMsg);
       const assistantMsg = { role: 'assistant', content: '', model: activeModel };
-      const { row, content, body } = appendMessageElement(assistantMsg); content.classList.add('typing-cursor');
+      session.messages.push(assistantMsg);
+      saveSessionsToStorage();
+      const { row, content, body, turn } = appendMessageElement(assistantMsg); content.classList.add('typing-cursor');
       isGenerating = true; document.getElementById('send-btn').style.display = 'none'; document.getElementById('stop-btn').style.display = 'inline-flex';
       abortController = new AbortController();
       try {
@@ -741,7 +768,16 @@
           const lines = buffer.split('\n'); buffer = lines.pop();
           for (const line of lines) {
             if (!line.trim()) continue;
-            try { const chunk = JSON.parse(line); if (chunk.error) throw new Error(chunk.error); if (chunk.message?.content) { accumulated += chunk.message.content; content.innerHTML = renderMarkdown(accumulated); document.getElementById('messages-container').scrollTop = document.getElementById('messages-container').scrollHeight; } } catch {} }
+            try {
+              const chunk = JSON.parse(line);
+              if (chunk.error) throw new Error(chunk.error);
+              if (chunk.tool) renderToolChip(turn, chunk.tool);
+              if (chunk.message?.content) {
+                accumulated += chunk.message.content;
+                content.innerHTML = renderMarkdown(accumulated);
+                scrollPopupToEnd();
+              }
+            } catch {} }
         }
         if (!accumulated.trim()) accumulated = '*(No response received)*';
         assistantMsg.content = accumulated; content.classList.remove('typing-cursor'); content.innerHTML = renderMarkdown(accumulated); saveSessionsToStorage();
@@ -788,8 +824,12 @@
       } catch (e) { alert('Save failed: ' + e.message); }
     }
 
-    // ---------- Draggable response pop-ups ----------
-    let popupSeq = 0;
+    // ---------- One chat pop-up per session ----------
+    // Replies used to spawn a window each, so a long conversation buried the
+    // screen in overlapping pop-ups. A session now owns one pop-up and every turn
+    // is appended to it, which keeps the exchange connected and readable.
+    let sessionPopup = null;
+    let popupRestore = null;
     let popupZ = 10;
 
     // The pop-ups live in a window-level layer, so they can be dragged anywhere
@@ -807,21 +847,102 @@
     function clearResponses() {
       const layer = document.getElementById('response-layer');
       if (layer) layer.innerHTML = '';
-      popupSeq = 0;
+      sessionPopup = null;
+      popupRestore = null;
+    }
+
+    function currentPopupKey() { return 'computera_popup_pos:' + (currentSessionId || 'default'); }
+
+    function scrollPopupToEnd() {
+      if (!sessionPopup) return;
+      const stream = sessionPopup.querySelector('.popup-stream');
+      if (stream) stream.scrollTop = stream.scrollHeight;
+    }
+
+    function savedPopupPosition() {
+      try { return JSON.parse(localStorage.getItem(currentPopupKey()) || 'null'); } catch { return null; }
     }
 
     function placePopup(pop) {
-      responseLayer();
-      const gap = 14;
+      const gap = 16;
       const viewW = window.innerWidth;
       const viewH = window.innerHeight;
-      const width = Math.max(280, Math.min(560, viewW - gap * 2));
-      const step = popupSeq++ % 8;
-      const maxX = Math.max(gap, viewW - width - gap);
-      const maxY = Math.max(gap, viewH - 200);
+      const width = Math.max(300, Math.min(560, viewW - gap * 2));
+      const saved = savedPopupPosition();
+      const left = saved && Number.isFinite(saved.left) ? saved.left : viewW - width - 24;
+      // Below the app and pane headers, so the first reply does not cover them.
+      const top = saved && Number.isFinite(saved.top) ? saved.top : 168;
       pop.style.width = width + 'px';
-      pop.style.left = Math.max(gap, maxX - step * 22) + 'px';
-      pop.style.top = Math.max(gap, Math.min(maxY, 78 + step * 24)) + 'px';
+      pop.style.left = Math.max(0, Math.min(left, Math.max(0, viewW - width))) + 'px';
+      pop.style.top = Math.max(0, Math.min(top, Math.max(0, viewH - 120))) + 'px';
+    }
+
+    function refreshPopupTitle() {
+      if (!sessionPopup) return;
+      const session = getCurrentSession();
+      const title = sessionPopup.querySelector('.popup-title');
+      if (title) title.textContent = (session && session.title) || 'Conversation';
+    }
+
+    // Closing hides the transcript without throwing it away; the restore chip
+    // brings the same window back, so history never disappears entirely.
+    function hideSessionPopup() {
+      if (!sessionPopup) return;
+      sessionPopup.style.display = 'none';
+      if (popupRestore) return;
+      popupRestore = document.createElement('button');
+      popupRestore.type = 'button';
+      popupRestore.className = 'btn btn-sm btn-secondary popup-restore';
+      popupRestore.textContent = '⚡ Show session';
+      popupRestore.addEventListener('click', () => {
+        if (popupRestore) { popupRestore.remove(); popupRestore = null; }
+        if (sessionPopup) { sessionPopup.style.display = ''; sessionPopup.style.zIndex = String(++popupZ); scrollPopupToEnd(); }
+      });
+      responseLayer();
+      document.body.appendChild(popupRestore);
+    }
+
+    function ensureSessionPopup() {
+      if (sessionPopup && sessionPopup.isConnected) return sessionPopup;
+      if (popupRestore) { popupRestore.remove(); popupRestore = null; }
+      const session = getCurrentSession() || {};
+      const pop = document.createElement('div');
+      pop.className = 'response-popup session-popup';
+      pop.style.zIndex = String(++popupZ);
+      const bar = document.createElement('div'); bar.className = 'response-popup-bar';
+      const grip = document.createElement('span'); grip.className = 'popup-grip'; grip.textContent = '⠿'; grip.title = 'Drag to move';
+      const title = document.createElement('span'); title.className = 'popup-title'; title.textContent = session.title || 'Conversation';
+      const actions = document.createElement('div'); actions.className = 'popup-actions';
+      const minBtn = document.createElement('button'); minBtn.type = 'button'; minBtn.className = 'popup-btn'; minBtn.title = 'Collapse'; minBtn.textContent = '–';
+      minBtn.addEventListener('click', () => pop.classList.toggle('collapsed'));
+      const closeBtn = document.createElement('button'); closeBtn.type = 'button'; closeBtn.className = 'popup-btn'; closeBtn.title = 'Close'; closeBtn.textContent = '✕';
+      closeBtn.addEventListener('click', hideSessionPopup);
+      actions.append(minBtn, closeBtn);
+      bar.append(grip, title, actions);
+      const stream = document.createElement('div'); stream.className = 'popup-stream';
+      pop.append(bar, stream);
+      responseLayer().appendChild(pop);
+      sessionPopup = pop;
+      makeDraggable(pop, bar);
+      placePopup(pop);
+      return pop;
+    }
+
+    // Tool calls are part of the answer: show which file the model read or wrote.
+    function renderToolChip(turnEl, tool) {
+      if (!turnEl || !tool) return;
+      let chips = turnEl.querySelector('.tool-chips');
+      if (!chips) {
+        chips = document.createElement('div');
+        chips.className = 'tool-chips';
+        turnEl.insertBefore(chips, turnEl.querySelector('.message-content'));
+      }
+      const path = tool.path ? String(tool.path).replace(/^.*[\\/]/, '') : '';
+      const chip = document.createElement('span');
+      chip.className = 'tool-chip' + (tool.ok === false ? ' bad' : '');
+      chip.textContent = (tool.ok === false ? '✕ ' : '✓ ') + String(tool.name || 'tool').replace(/_/g, ' ') + (path ? ' · ' + path : '');
+      chip.title = tool.error || (String(tool.name || '') + (tool.path ? ' ' + tool.path : ''));
+      chips.appendChild(chip);
     }
 
     function makeDraggable(pop, handle) {
@@ -847,6 +968,9 @@
           handle.removeEventListener('pointermove', move);
           handle.removeEventListener('pointerup', up);
           handle.removeEventListener('pointercancel', up);
+          try {
+            localStorage.setItem(currentPopupKey(), JSON.stringify({ left: pop.offsetLeft, top: pop.offsetTop }));
+          } catch {}
         };
         handle.addEventListener('pointermove', move);
         handle.addEventListener('pointerup', up);
@@ -860,28 +984,24 @@
       const messagesList = document.getElementById('messages-list');
       const content = document.createElement('div'); content.className = 'message-content';
 
-      // Assistant replies float as draggable pop-up windows.
+      // Assistant replies append to the session's one pop-up, in order.
       if (msg.role === 'assistant') {
+        const pop = ensureSessionPopup();
+        refreshPopupTitle();
+        const stream = pop.querySelector('.popup-stream');
+        if (stream.children.length) {
+          const divider = document.createElement('div');
+          divider.className = 'popup-divider';
+          stream.appendChild(divider);
+        }
+        const turn = document.createElement('div'); turn.className = 'popup-turn';
+        const meta = document.createElement('div'); meta.className = 'popup-turn-meta';
+        meta.textContent = msg.model || 'Computera AI';
         content.innerHTML = renderMarkdown(msg.content || '');
-        const pop = document.createElement('div'); pop.className = 'response-popup';
-        pop.style.zIndex = String(++popupZ);
-        const bar = document.createElement('div'); bar.className = 'response-popup-bar';
-        const grip = document.createElement('span'); grip.className = 'popup-grip'; grip.textContent = '⠿'; grip.title = 'Drag to move';
-        const title = document.createElement('span'); title.className = 'popup-title'; title.textContent = `⚡ ${msg.model || 'Computera AI'}`;
-        const actions = document.createElement('div'); actions.className = 'popup-actions';
-        const minBtn = document.createElement('button'); minBtn.type = 'button'; minBtn.className = 'popup-btn'; minBtn.title = 'Collapse'; minBtn.textContent = '–';
-        minBtn.addEventListener('click', () => pop.classList.toggle('collapsed'));
-        const closeBtn = document.createElement('button'); closeBtn.type = 'button'; closeBtn.className = 'popup-btn'; closeBtn.title = 'Close'; closeBtn.textContent = '✕';
-        closeBtn.addEventListener('click', () => pop.remove());
-        actions.append(minBtn, closeBtn);
-        bar.append(grip, title, actions);
-        const body = document.createElement('div'); body.className = 'response-popup-body';
-        body.appendChild(content);
-        pop.append(bar, body);
-        responseLayer().appendChild(pop);
-        placePopup(pop);
-        makeDraggable(pop, bar);
-        return { row: pop, content, body };
+        turn.append(meta, content);
+        stream.appendChild(turn);
+        if (scroll) scrollPopupToEnd();
+        return { row: pop, content, body: stream, turn, meta };
       }
 
       // User messages stay in the conversation flow.
@@ -900,11 +1020,17 @@
     function autoResizeTextarea(el) { el.style.height = 'auto'; el.style.height = el.scrollHeight + 'px'; }
 
     // ---------- Sessions ----------
-    function loadSessionsFromStorage() { try { chatSessions = JSON.parse(localStorage.getItem('computera_chat_sessions') || '[]'); } catch { chatSessions = []; } }
+    function loadSessionsFromStorage() {
+      try { chatSessions = JSON.parse(localStorage.getItem('computera_chat_sessions') || '[]'); } catch { chatSessions = []; }
+      // Reopen the session (and its one pop-up) the user was last in, instead of
+      // silently starting an empty conversation on every reload.
+      try { currentSessionId = localStorage.getItem('computera_current_session') || null; } catch {}
+    }
+    function rememberSession(id) { try { if (id) localStorage.setItem('computera_current_session', id); } catch {} }
     function saveSessionsToStorage() { try { localStorage.setItem('computera_chat_sessions', JSON.stringify(chatSessions)); } catch {} }
-    function startNewChat() { const s = { id: 'session_' + Date.now(), title: 'New Conversation', messages: [], createdAt: new Date().toISOString() }; chatSessions.unshift(s); currentSessionId = s.id; saveSessionsToStorage(); renderChatSessionsList(); renderCurrentChat(); }
-    function selectSession(id) { currentSessionId = id; renderChatSessionsList(); renderCurrentChat(); }
-    function deleteSession(id, e) { e.stopPropagation(); if (chatSessions.length <= 1) { startNewChat(); return; } chatSessions = chatSessions.filter(s => s.id !== id); if (currentSessionId === id) currentSessionId = chatSessions[0].id; saveSessionsToStorage(); renderChatSessionsList(); renderCurrentChat(); }
+    function startNewChat() { const s = { id: 'session_' + Date.now(), title: 'New Conversation', messages: [], createdAt: new Date().toISOString() }; chatSessions.unshift(s); currentSessionId = s.id; rememberSession(s.id); saveSessionsToStorage(); renderChatSessionsList(); renderCurrentChat(); }
+    function selectSession(id) { currentSessionId = id; rememberSession(id); renderChatSessionsList(); renderCurrentChat(); }
+    function deleteSession(id, e) { e.stopPropagation(); if (chatSessions.length <= 1) { startNewChat(); return; } chatSessions = chatSessions.filter(s => s.id !== id); if (currentSessionId === id) { currentSessionId = chatSessions[0].id; rememberSession(currentSessionId); } saveSessionsToStorage(); renderChatSessionsList(); renderCurrentChat(); }
     function renderChatSessionsList() { const c = document.getElementById('chat-sessions-list'); c.innerHTML = ''; chatSessions.forEach(s => { const item = document.createElement('div'); item.className = 'chat-session-item' + (s.id === currentSessionId ? ' active' : ''); item.onclick = () => selectSession(s.id); const title = document.createElement('div'); title.className = 'chat-session-title'; title.textContent = s.title || 'Conversation'; const del = document.createElement('button'); del.className = 'btn-icon btn-sm'; del.innerHTML = '✕'; del.title = 'Delete'; del.onclick = (e) => deleteSession(s.id, e); item.appendChild(title); item.appendChild(del); c.appendChild(item); }); }
     function getCurrentSession() { return chatSessions.find(s => s.id === currentSessionId); }
     function clearCurrentChat() { const s = getCurrentSession(); if (s) { s.messages = []; saveSessionsToStorage(); renderCurrentChat(); } }

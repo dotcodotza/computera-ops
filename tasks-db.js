@@ -19,8 +19,20 @@ const AGENT_RE = /^[a-z0-9][a-z0-9_-]{0,39}$/;
 
 fs.ensureDirSync(DATA_DIR);
 
-const db = new DatabaseSync(DB_FILE);
-db.exec('PRAGMA journal_mode = WAL;');
+export const SQLITE_PRAGMAS = [
+  'PRAGMA journal_mode = WAL;',
+  'PRAGMA busy_timeout = 5000;',
+];
+
+// One place that knows how this app opens SQLite: WAL plus a busy timeout, so a
+// second process writing the same file waits instead of failing with "database is locked".
+export function openSqlite(file = DB_FILE) {
+  const conn = new DatabaseSync(file);
+  for (const pragma of SQLITE_PRAGMAS) conn.exec(pragma);
+  return conn;
+}
+
+const db = openSqlite();
 db.exec(`
   CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
@@ -87,6 +99,8 @@ for (const [name, ddl] of [
   ['attempts', 'ALTER TABLE tasks ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0'],
   ['blocked_reason', 'ALTER TABLE tasks ADD COLUMN blocked_reason TEXT'],
   ['result', 'ALTER TABLE tasks ADD COLUMN result TEXT'],
+  ['parent_id', 'ALTER TABLE tasks ADD COLUMN parent_id TEXT'],
+  ['sprint_id', 'ALTER TABLE tasks ADD COLUMN sprint_id TEXT'],
 ]) {
   if (!existingColumns.has(name)) db.exec(ddl);
 }
@@ -123,6 +137,8 @@ function rowToTask(row) {
     attempts: Number(row.attempts || 0),
     blocked_reason: row.blocked_reason || null,
     result: row.result || null,
+    parent_id: row.parent_id || null,
+    sprint_id: row.sprint_id || null,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -235,16 +251,20 @@ export function createTask(input = {}) {
     attempts: 0,
     blocked_reason: null,
     result: null,
+    parent_id: input.parent_id ? String(input.parent_id) : null,
+    sprint_id: input.sprint_id ? String(input.sprint_id) : null,
     created_at: now,
     updated_at: now,
   };
   db.prepare(`
     INSERT INTO tasks (id, title, description, status, priority, agent, assignee, due_date, tags,
                        kilo_session_id, last_message_id, last_run_at, needs, assigned_worker,
-                       attempts, blocked_reason, result, created_at, updated_at)
+                       attempts, blocked_reason, result, parent_id,
+                       sprint_id, created_at, updated_at)
     VALUES (:id, :title, :description, :status, :priority, :agent, :assignee, :due_date, :tags,
             :kilo_session_id, :last_message_id, :last_run_at, :needs, :assigned_worker,
-            :attempts, :blocked_reason, :result, :created_at, :updated_at)
+            :attempts, :blocked_reason, :result, :parent_id,
+            :sprint_id, :created_at, :updated_at)
   `).run(task);
   return getTask(task.id);
 }
@@ -273,13 +293,16 @@ export function updateTask(id, patch = {}) {
   }
   if ('blocked_reason' in patch) next.blocked_reason = patch.blocked_reason ? String(patch.blocked_reason) : null;
   if ('result' in patch) next.result = patch.result ? String(patch.result) : null;
+  if ('parent_id' in patch) next.parent_id = patch.parent_id ? String(patch.parent_id) : null;
+  if ('sprint_id' in patch) next.sprint_id = patch.sprint_id ? String(patch.sprint_id) : null;
 
   db.prepare(`
     UPDATE tasks SET title = :title, description = :description, status = :status, priority = :priority,
       agent = :agent, assignee = :assignee, due_date = :due_date, tags = :tags,
       kilo_session_id = :kilo_session_id, last_message_id = :last_message_id, last_run_at = :last_run_at,
       needs = :needs, assigned_worker = :assigned_worker, attempts = :attempts,
-      blocked_reason = :blocked_reason, result = :result, updated_at = :updated_at
+      blocked_reason = :blocked_reason, result = :result,
+      parent_id = :parent_id, sprint_id = :sprint_id, updated_at = :updated_at
     WHERE id = :id
   `).run({
     id,
@@ -299,6 +322,8 @@ export function updateTask(id, patch = {}) {
     attempts: Number(next.attempts || 0),
     blocked_reason: next.blocked_reason || null,
     result: next.result || null,
+    parent_id: next.parent_id || null,
+    sprint_id: next.sprint_id || null,
     updated_at: new Date().toISOString(),
   });
   return getTask(id);
@@ -485,3 +510,5 @@ export function saveRotation({ date, worker_id = null, host_url = '', link_token
 }
 
 export { STATUSES, PRIORITIES, AGENTS, NEEDS };
+
+export { db };

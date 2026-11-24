@@ -21,6 +21,14 @@ import {
 } from './tasks-db.js';
 import { createFleet, probeCapabilities, startWorkerHeartbeat, todayKey } from './fleet.js';
 import { createKiloRuns } from './kilo-runs.js';
+import { createSprints, buildStepPrompt, assignFleetRoles, STAGE_TEMPLATES, ROLES } from './sprint.js';
+import {
+  createSprint, getSprint, listSprints, updateSprint, addSprintStep, listSprintSteps,
+  getSprintStep, updateSprintStep, nextPendingStep, addSprintFeed, listSprintFeed,
+  resetInterruptedSprints,
+} from './sprints-db.js';
+import { proxyRequest } from './proxy.js';
+import { createWebSearch, WEB_SEARCH_TOOL } from './web-search.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -29,6 +37,10 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
 const KILO_URL = process.env.KILO_URL || 'http://127.0.0.1:7777';
+
+// Web search for the chat agent. Without EXA_API_KEY the route answers 503 and
+// the rest of the app runs unchanged.
+const webSearch = createWebSearch();
 
 // -------------------------------------------------------------
 // Fleet configuration
@@ -77,6 +89,14 @@ const SHARED_FS_DENY = new Set(['data', 'node_modules', 'memory', '.git', '.free
 
 app.use(cors());
 
+// Lightweight counters served by /api/metrics (Stage 3: observability).
+const METRICS = { startedAt: Date.now(), requests: 0, errors: 0, proxy: 0, dispatch: 0 };
+app.use((req, res, next) => {
+  METRICS.requests++;
+  res.on('finish', () => { if (res.statusCode >= 500) METRICS.errors++; });
+  next();
+});
+
 // -------------------------------------------------------------
 // Fleet security helpers
 // -------------------------------------------------------------
@@ -114,11 +134,38 @@ function basicAuthOk(req) {
   return idx > -1 && decoded.slice(0, idx) === BASIC_AUTH_USER && decoded.slice(idx + 1) === BASIC_AUTH_PASS;
 }
 
+// A request arriving through the public tunnel still has the tunnel hostname in
+// its Host header, even though cloudflared connects from loopback.
+// Sitting at this machine means the browser talked to a loopback host. The client
+// IP alone is not enough: cloudflared also connects from 127.0.0.1, so a tunnel
+// whose URL no longer matches PUBLIC_URL would otherwise look like the operator.
+function isLoopbackHost(req) {
+  const host = String(req.headers.host || '').toLowerCase().replace(/:\d+$/, '');
+  return host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1';
+}
+
 // Rotating public link: only today's token (or its cookie) opens the app when PUBLIC_MODE is on.
 if (PUBLIC_MODE) {
   app.use((req, res, next) => {
     if (!activeLinkToken) return next();
-    if (req.path === '/api/fleet/join' || req.path === '/api/fleet/heartbeat' || req.path === '/api/fleet/run' || req.path.startsWith('/api/fleet/run/')) {
+    // Machine-to-machine entry points authenticate themselves (FLEET_TOKEN), so
+    // they stay reachable through a public tunnel without today's link.
+    if (req.path === '/api/fleet/join' || req.path === '/api/fleet/heartbeat' || req.path === '/api/fleet/run'
+      || req.path.startsWith('/api/fleet/run/')
+      || req.path.startsWith('/proxy/kilo') || req.path.startsWith('/proxy/ollama')) {
+      return next();
+    }
+    // Health is what an operator or monitor polls. A request that arrived through
+    // the public tunnel (its Host is PUBLIC_URL) needs the fleet token; a local
+    // one needs no visitor link. Cloudflared connects from loopback, so the Host
+    // header is what tells the two apart.
+    if (req.path === '/api/health' && (hasFleetToken(req) || isLoopbackHost(req))) {
+      return next();
+    }
+    // Sitting at this machine is itself authorization: cloudflared connects from
+    // loopback too, so a real tunnel request is recognised by its Host header.
+    if (isLoopbackHost(req)) {
+      req.workspaceScope = 'full';
       return next();
     }
     // The operator's Basic auth is the stable credential; it opens the app without a link.
@@ -129,6 +176,13 @@ if (PUBLIC_MODE) {
     if (sameSecret(req.query.t, activeLinkToken)) {
       res.setHeader('Set-Cookie', `cops_link=${encodeURIComponent(activeLinkToken)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`);
       req.fleetLinkOk = true;
+      // Trade the token for the cookie and drop it from the address bar, so the
+      // page the visitor ends up on is not a credential they might share again.
+      if (req.method === 'GET' && !req.path.startsWith('/api/')) {
+        const clean = new URL(req.originalUrl, 'http://app.local');
+        clean.searchParams.delete('t');
+        return res.redirect(302, clean.pathname + clean.search);
+      }
       return next();
     }
     const cookies = String(req.headers.cookie || '').split(';').map(p => p.trim());
@@ -161,6 +215,26 @@ if (PUBLIC_MODE) {
   });
 }
 
+// Engine proxies. Mounted before express.json() so request bodies stream through
+// untouched (Kilo and Ollama both answer with event streams that must not be
+// buffered), and behind the fleet token so a public tunnel never becomes an open
+// relay to this machine's engines. (Stage 2: connectivity.)
+app.use('/proxy/kilo', fleetRateLimit, requireFleetTokenStrict, (req, res) => {
+  METRICS.proxy++;
+  proxyRequest(req, res, {
+    targetUrl: KILO_URL,
+    path: req.originalUrl.slice('/proxy/kilo'.length) || '/',
+    headers: { 'x-kilo-directory': KILO_DIRECTORY },
+  }).catch((err) => { if (!res.headersSent) res.status(502).json({ error: err.message }); });
+});
+app.use('/proxy/ollama', fleetRateLimit, requireFleetTokenStrict, (req, res) => {
+  METRICS.proxy++;
+  proxyRequest(req, res, {
+    targetUrl: OLLAMA_URL,
+    path: req.originalUrl.slice('/proxy/ollama'.length) || '/',
+  }).catch((err) => { if (!res.headersSent) res.status(502).json({ error: err.message }); });
+});
+
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/uploads', express.static(UPLOADS_DIR));
@@ -171,7 +245,7 @@ fs.ensureDirSync(UPLOADS_DIR);
 
 // Worker nodes read the shared calendar and roster from the master, so the master
 // stays the only writer to the shared SQLite database.
-const MASTER_PROXY_PATHS = ['/api/tasks', '/api/calendar', '/api/fleet/workers', '/api/fleet/today', '/api/fleet/events', '/api/fleet/rotate', '/api/fleet/dispatch'];
+const MASTER_PROXY_PATHS = ['/api/tasks', '/api/calendar', '/api/fleet/workers', '/api/fleet/today', '/api/fleet/events', '/api/fleet/rotate', '/api/fleet/dispatch', '/api/sprints', '/api/automations'];
 if (ROLE === 'worker' && MASTER_URL) {
   app.use((req, res, next) => {
     if (!MASTER_PROXY_PATHS.some(p => req.path === p || req.path.startsWith(p + '/'))) return next();
@@ -367,14 +441,48 @@ const FS_TOOLS = [
         required: ['filename']
       }
     }
-  }
+  },
+  WEB_SEARCH_TOOL
 ];
 
-// Helper to execute filesystem tools
+const FS_TOOL_NAMES = new Set(FS_TOOLS.filter(t => t.function).map(t => t.function.name));
+
+// Smaller models often print the call as text instead of emitting tool_calls:
+//   {"name": "read_file", "arguments": {"filepath": "a.txt"}}
+// Without this the request looks like it read a file when nothing touched disk.
+function parseTextToolCall(text) {
+  if (!text || typeof text !== 'string') return null;
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  for (const raw of [fenced ? fenced[1] : null, text]) {
+    if (!raw) continue;
+    const start = raw.indexOf('{');
+    const end = raw.lastIndexOf('}');
+    if (start === -1 || end <= start) continue;
+    let obj = null;
+    try { obj = JSON.parse(raw.slice(start, end + 1)); } catch { continue; }
+    if (!obj || typeof obj !== 'object') continue;
+    const fn = obj.function && typeof obj.function === 'object' ? obj.function : null;
+    const name = obj.name || obj.tool || fn?.name;
+    let args = obj.arguments ?? obj.args ?? obj.parameters ?? obj.input ?? fn?.arguments ?? {};
+    if (typeof args === 'string') { try { args = JSON.parse(args); } catch { args = {}; } }
+    if (name && FS_TOOL_NAMES.has(name) && args && typeof args === 'object') return { name, args };
+  }
+  return null;
+}
+
+// Helper to execute the agent's tools (files, documents, PDFs, web search).
 async function executeTool(name, args, req) {
+  args = args && typeof args === 'object' ? args : {};
+  // A model that emits a call without its required path must get an answer back,
+  // not a crash that fails the whole chat turn. The guidance in the error is what
+  // small models read before their next attempt.
+  const needsPath = ['read_file', 'write_file', 'read_document_text', 'edit_pdf'];
+  if (needsPath.includes(name) && (typeof args.filepath !== 'string' || !args.filepath.trim())) {
+    return { error: `${name} needs a filepath argument` };
+  }
   if (name === 'list_directory') {
     const target = args.dirpath && args.dirpath !== '.' ? path.resolve(args.dirpath) : __dirname;
-    if (!isPathAllowed(target, req)) return { error: `Access denied to path: ${target}` };
+    if (!isPathAllowed(target, req)) return { error: `Path is outside the workspace: ${target}. Use a workspace-relative path such as "package.json".` };
     const exists = await fs.pathExists(target);
     if (!exists) return { error: `Directory not found: ${target}` };
     const entries = await fs.readdir(target, { withFileTypes: true });
@@ -384,7 +492,7 @@ async function executeTool(name, args, req) {
 
   if (name === 'read_file') {
     const target = path.resolve(__dirname, args.filepath);
-    if (!isPathAllowed(target, req)) return { error: `Access denied to path: ${target}` };
+    if (!isPathAllowed(target, req)) return { error: `Path is outside the workspace: ${target}. Use a workspace-relative path such as "package.json".` };
     const exists = await fs.pathExists(target);
     if (!exists) return { error: `File not found: ${target}` };
     const stat = await fs.stat(target);
@@ -395,7 +503,7 @@ async function executeTool(name, args, req) {
 
   if (name === 'write_file') {
     const target = path.resolve(__dirname, args.filepath);
-    if (!isPathAllowed(target, req)) return { error: `Access denied to path: ${target}` };
+    if (!isPathAllowed(target, req)) return { error: `Path is outside the workspace: ${target}. Use a workspace-relative path such as "package.json".` };
     if (!canWriteWorkspace(req)) return { error: 'This link has read-only workspace access' };
     await fs.outputFile(target, args.content || '');
     return { success: true, filepath: target, bytesWritten: (args.content || '').length };
@@ -403,7 +511,7 @@ async function executeTool(name, args, req) {
 
   if (name === 'read_document_text') {
     const target = path.resolve(__dirname, args.filepath);
-    if (!isPathAllowed(target, req)) return { error: `Access denied to path: ${target}` };
+    if (!isPathAllowed(target, req)) return { error: `Path is outside the workspace: ${target}. Use a workspace-relative path such as "package.json".` };
     const exists = await fs.pathExists(target);
     if (!exists) return { error: `File not found: ${target}` };
     try {
@@ -416,7 +524,7 @@ async function executeTool(name, args, req) {
 
   if (name === 'edit_pdf') {
     const target = path.resolve(__dirname, args.filepath);
-    if (!isPathAllowed(target, req)) return { error: `Access denied to path: ${target}` };
+    if (!isPathAllowed(target, req)) return { error: `Path is outside the workspace: ${target}. Use a workspace-relative path such as "package.json".` };
     const exists = await fs.pathExists(target);
     if (!exists) return { error: `File not found: ${target}` };
     try {
@@ -444,6 +552,14 @@ async function executeTool(name, args, req) {
     return { success: true, filepath: target, message: 'File ready for use' };
   }
 
+  if (name === 'web_search') {
+    try {
+      return await webSearch.search(args.query, { numResults: args.numResults });
+    } catch (err) {
+      return { error: err.message };
+    }
+  }
+
   return { error: `Unknown tool: ${name}` };
 }
 
@@ -451,14 +567,48 @@ async function executeTool(name, args, req) {
 // API Endpoints
 // -------------------------------------------------------------
 
-// Health check
+// Health check: one call tells an operator what this node can do right now.
 app.get('/api/health', async (req, res) => {
   let ollamaStatus = 'offline';
   try {
     const check = await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(2000) });
     if (check.ok) ollamaStatus = 'online';
   } catch { ollamaStatus = 'unreachable'; }
-  res.json({ status: 'ok', ollama: OLLAMA_URL, ollamaStatus, workspace: __dirname, platform: process.platform, povMode: POV_MODE });
+
+  let kiloStatus = 'offline';
+  try {
+    const check = await fetch(`${KILO_URL}/global/health`, { signal: AbortSignal.timeout(2000) });
+    if (check.ok) kiloStatus = 'online';
+  } catch { kiloStatus = 'unreachable'; }
+
+  const uptimeSec = Math.round((Date.now() - METRICS.startedAt) / 1000);
+  res.json({
+    status: 'ok',
+    ollama: OLLAMA_URL, ollamaStatus,
+    kilo: KILO_URL, kiloStatus,
+    kiloRuns: kiloRuns.activeRuns().map(r => ({
+      id: r.id, sessionId: r.sessionId, status: r.status, elapsedMs: r.elapsedMs, waiting: !!r.waiting,
+    })),
+    workspace: __dirname, platform: process.platform, povMode: POV_MODE,
+    webSearch: webSearch.configured ? 'configured' : 'missing EXA_API_KEY',
+    role: ROLE, node: SELF_ID, tunnel: PUBLIC_URL || null,
+    uptimeSec,
+    requests: METRICS.requests,
+  });
+});
+
+// Counters plus per-worker circuit state, for the dashboard and monitoring.
+app.get('/api/metrics', fleetRateLimit, requireFleetRead, (req, res) => {
+  res.json({
+    uptimeSec: Math.round((Date.now() - METRICS.startedAt) / 1000),
+    requests: METRICS.requests,
+    errors5xx: METRICS.errors,
+    proxyRequests: METRICS.proxy,
+    dispatches: METRICS.dispatch,
+    kiloRuns: kiloRuns.activeRuns().map(r => ({ id: r.id, sessionId: r.sessionId, elapsedMs: r.elapsedMs })),
+    workers: typeof fleet.health === 'function' ? fleet.health() : {},
+    memoryMb: Math.round(process.memoryUsage().rss / 1048576),
+  });
 });
 
 // List Ollama models
@@ -470,6 +620,22 @@ app.get('/api/models', async (req, res) => {
     res.json(data);
   } catch (err) {
     res.status(502).json({ error: `Cannot reach Ollama at ${OLLAMA_URL}: ${err.message}`, models: [] });
+  }
+});
+
+// Web search through Exa, used by the chat agent's web_search tool and by the UI.
+// This spends the node's Exa quota, so on a public node it needs the fleet token
+// or Basic auth, the same rule as tool execution.
+app.post('/api/web/search', fleetRateLimit, async (req, res) => {
+  if (PUBLIC_MODE && !hasFleetToken(req) && !basicAuthOk(req)) {
+    return res.status(403).json({ error: 'Web search requires the fleet token' });
+  }
+  try {
+    const { query, numResults, includeDomains, excludeDomains, category } = req.body || {};
+    const result = await webSearch.search(query, { numResults, includeDomains, excludeDomains, category });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message });
   }
 });
 
@@ -768,7 +934,9 @@ CRITICAL INSTRUCTIONS - READ CAREFULLY:
 3. When analyzing an attached file, quote its actual content. Do not fabricate details not present in the file.
 4. If a file is empty or minimal, say so. Do not expand it into a full system or project.
 5. Be accurate, helpful, and concise. Format code blocks with language identifiers.
-6. When answering code or file questions, ground every claim in the actual file content visible to you.`;
+6. When answering code or file questions, ground every claim in the actual file content visible to you.
+7. You can use read_file, list_directory, read_document_text and write_file on the workspace. Read a file before describing or editing it, and use write_file when the user asks you to save or change a file instead of only printing code.
+8. Tool paths are workspace-relative: call read_file with {"filepath": "package.json"}, never an absolute or invented path such as C:\\path\\to\\file.`;
 
     let effectiveSystem = system ? `${defaultSystem}\n\n${system}` : defaultSystem;
 
@@ -804,24 +972,66 @@ CRITICAL INSTRUCTIONS - READ CAREFULLY:
     if (req.body.options && typeof req.body.options === 'object') requestPayload.options = { ...requestPayload.options, ...req.body.options };
     if (enableTools && !stream) requestPayload.tools = FS_TOOLS;
 
-    // Resolve tool calls up front when enabled, then stream the final answer.
-if (enableTools) {
-  const toolRes = await fetch(`${OLLAMA_URL}/api/chat`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, messages, system: effectiveSystem, stream: false, tools: FS_TOOLS, options: requestPayload.options })
-  });
-  if (toolRes.ok) {
-    const toolData = await toolRes.json();
-    if (toolData.message && Array.isArray(toolData.message.tool_calls) && toolData.message.tool_calls.length) {
-      const toolResults = [];
-      for (const tc of toolData.message.tool_calls) {
-        const result = await executeTool(tc.function.name, tc.function.arguments || {}, req);
-        toolResults.push({ role: 'tool', content: JSON.stringify(result) });
+    // Resolve tool calls before streaming, and keep going while the model asks for
+    // more: reading a file then writing another needs more than one round. Every
+    // executed call is reported on the stream so the chat can show what touched disk.
+    const toolRuns = [];
+    const ranTools = new Set();
+    if (enableTools) {
+      for (let round = 0; round < 4; round++) {
+        const toolRes = await fetch(`${OLLAMA_URL}/api/chat`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model, messages, system: effectiveSystem, stream: false, tools: FS_TOOLS, options: requestPayload.options })
+        });
+        if (!toolRes.ok) break;
+        const toolData = await toolRes.json().catch(() => null);
+        const nativeCalls = toolData && toolData.message && Array.isArray(toolData.message.tool_calls)
+          ? toolData.message.tool_calls
+          : [];
+        let calls = nativeCalls;
+        if (!calls.length) {
+          const guess = parseTextToolCall(toolData && toolData.message ? toolData.message.content : '');
+          if (guess) calls = [{ function: { name: guess.name, arguments: guess.args } }];
+        }
+        if (!calls.length) break;
+        const signature = (tc) => (tc.function?.name || '') + ':' + JSON.stringify(tc.function?.arguments || {});
+        // Small models can loop on the same call; one execution of it is enough.
+        if (calls.every(tc => ranTools.has(signature(tc)))) break;
+        const toolResults = [];
+        for (const tc of calls) {
+          let args = tc.function && tc.function.arguments;
+          if (!args) args = {};
+          if (typeof args === 'string') { try { args = JSON.parse(args); } catch { args = {}; } }
+          const name = (tc.function && tc.function.name) || 'unknown';
+          ranTools.add(name + ':' + JSON.stringify(args));
+          let result;
+          try {
+            result = await executeTool(name, args, req);
+          } catch (err) {
+            result = { error: err.message };
+          }
+          toolResults.push({ role: 'tool', content: JSON.stringify(result) });
+          toolRuns.push({
+            name,
+            ok: !result.error,
+            path: result.filepath || args.filepath || args.dirpath || null,
+            error: result.error || null,
+          });
+        }
+        const assistantMessage = nativeCalls.length
+          ? toolData.message
+          : {
+              role: 'assistant',
+              content: '',
+              tool_calls: calls.map((tc, idx) => ({
+                id: 'call_' + round + '_' + idx,
+                type: 'function',
+                function: { name: tc.function.name, arguments: tc.function.arguments || {} },
+              })),
+            };
+        messages = [...messages, assistantMessage, ...toolResults];
       }
-      messages = [...messages, toolData.message, ...toolResults];
     }
-  }
-}
 
 const ollamaResponse = await fetch(`${OLLAMA_URL}/api/chat`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestPayload)
@@ -836,6 +1046,7 @@ const ollamaResponse = await fetch(`${OLLAMA_URL}/api/chat`, {
       res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
       res.setHeader('Cache-Control', 'no-cache, no-transform');
       res.setHeader('Connection', 'keep-alive');
+      for (const run of toolRuns) res.write(JSON.stringify({ tool: run }) + '\n');
       for await (const chunk of ollamaResponse.body) res.write(chunk);
       res.end();
     } else {
@@ -1304,6 +1515,9 @@ const fleet = createFleet({
   selfId: SELF_ID,
   selfName: SELF_NAME,
   runLocalTask: runTaskOnLocalEngine,
+  // Sprint steps name their role; only workers that serve that capability tier are
+  // preferred, so a long sprint spreads work across the whole fleet.
+  roleForWorker,
   onLinkToken: (token) => { activeLinkToken = token || null; },
   staleMs: 45000,
 });
@@ -1323,7 +1537,7 @@ function fleetRateLimit(req, res, next) {
 // Machine-to-machine calls need the shared token once one is configured.
 function requireFleetTokenStrict(req, res, next) {
   if (!FLEET_TOKEN) {
-    if (isPrivateClient(req)) return next();
+    if (isLoopbackHost(req)) return next();
     return res.status(401).json({ error: 'FLEET_TOKEN is required for remote fleet calls' });
   }
   if (hasFleetToken(req)) return next();
@@ -1333,7 +1547,7 @@ function requireFleetTokenStrict(req, res, next) {
 // Roster/calendar views plus the dashboard's own actions (dispatch, rotate) are
 // available to the local browser and to anyone already unlocked by today's link.
 function requireFleetRead(req, res, next) {
-  if (!FLEET_TOKEN || hasFleetToken(req) || isPrivateClient(req) || req.fleetLinkOk) return next();
+  if (!FLEET_TOKEN || hasFleetToken(req) || isLoopbackHost(req) || req.fleetLinkOk) return next();
   return res.status(401).json({ error: 'Fleet token required' });
 }
 
@@ -1380,6 +1594,7 @@ app.delete('/api/fleet/workers/:id', fleetRateLimit, requireFleetTokenStrict, (r
 // Capability-aware dispatch: pick the least-loaded worker that can actually run the task.
 app.post('/api/fleet/dispatch/:taskId', fleetRateLimit, requireFleetRead, async (req, res) => {
   try {
+    METRICS.dispatch++;
     const outcome = await fleet.dispatch(req.params.taskId);
     res.status(outcome.ok ? 200 : 409).json(outcome);
   } catch (err) {
@@ -1396,6 +1611,211 @@ app.post('/api/fleet/run/:taskId', fleetRateLimit, requireFleetTokenStrict, asyn
     const result = await runTaskOnLocalEngine(task);
     res.status(result.ok ? 200 : 502).json(result);
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// -------------------------------------------------------------
+// Sustained sprints (Stage 4) and automations (Stages 5-6)
+// -------------------------------------------------------------
+function roleOverrides() {
+  try {
+    const row = getSetting('automation_roles');
+    const parsed = row && row.value ? JSON.parse(row.value) : {};
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch { return {}; }
+}
+
+// Every model any online node reports, so role tiers follow the real fleet.
+function fleetModels() {
+  const models = new Set();
+  for (const worker of fleet.roster()) {
+    for (const model of ((worker.capabilities || {}).models || [])) {
+      if (model) models.add(String(model));
+    }
+  }
+  return [...models];
+}
+
+// Tiers are ranked across the whole fleet, so a worker with a single model still
+// serves a tier (smallest fleet-wide = pace-maker, largest = orchestrator). Cached
+// briefly because dispatch asks this once per candidate.
+let fleetRoleCache = { key: '', at: 0, roles: new Map() };
+function fleetModelRoles() {
+  const models = fleetModels();
+  const key = models.join('|');
+  const stamp = Date.now();
+  if (fleetRoleCache.key !== key || stamp - fleetRoleCache.at > 1500) {
+    const roles = assignFleetRoles(models, roleOverrides());
+    fleetRoleCache = { key, at: stamp, roles: new Map(roles.map(entry => [entry.model, entry.role])) };
+  }
+  return fleetRoleCache.roles;
+}
+
+function roleForWorker(worker) {
+  const roles = fleetModelRoles();
+  const served = new Set(
+    (((worker && worker.capabilities) || {}).models || [])
+      .map(model => roles.get(String(model)))
+      .filter(Boolean),
+  );
+  return ['orchestrator', 'worker', 'pace-maker'].find(role => served.has(role)) || null;
+}
+
+// A sprint step is a real child task, so it runs through the same capability-aware
+// dispatch, keeps its run output, and stays in the task list as an audit trail.
+async function runSprintStep(step, sprint, context = {}) {
+  const prompt = buildStepPrompt(step, sprint, context);
+  // Every engine is eligible; the role tier is expressed through dispatch, not by
+  // excluding Ollama-only workers from orchestration stages.
+  const needs = 'any';
+
+  if (step.task_id) {
+    try {
+      updateTask(step.task_id, { description: prompt, status: 'in_progress', blocked_reason: null, needs });
+    } catch (err) {
+      return { ok: false, error: 'could not prepare the step task: ' + err.message };
+    }
+    const outcome = await fleet.dispatch(step.task_id);
+    if (!outcome || !outcome.ok) return { ok: false, error: (outcome && outcome.error) || 'dispatch failed' };
+    const task = getTask(step.task_id);
+    const text = task && task.result ? String(task.result) : '';
+    if (!text.trim()) return { ok: false, error: 'step produced no output' };
+    return { ok: true, text };
+  }
+
+  const local = await runTaskOnLocalEngine({
+    id: step.id,
+    title: step.stage + ': ' + (step.source_title || sprint.goal),
+    description: prompt,
+    agent: step.role,
+    needs,
+  });
+  return local.ok ? { ok: true, text: local.text } : { ok: false, error: local.error };
+}
+
+const sprints = createSprints({
+  store: {
+    createSprint, getSprint, listSprints, updateSprint,
+    addSprintStep, listSprintSteps, getSprintStep, updateSprintStep, nextPendingStep,
+    addSprintFeed, listSprintFeed, resetInterruptedSprints,
+    createTask, getTask, updateTask,
+  },
+  runStep: runSprintStep,
+  maxParallel: Math.max(1, Math.min(Number(process.env.SPRINT_PARALLEL || 3) || 3, 4)),
+});
+
+// Sprint control changes shared state, so holding today's public link is not enough.
+function requireFleetAction(req, res, next) {
+  if (hasFleetToken(req) || basicAuthOk(req)) return next();
+  if (isLoopbackHost(req)) return next();
+  return res.status(403).json({ error: 'Sprint control requires the fleet token or local access' });
+}
+
+app.get('/api/automations/roles', fleetRateLimit, requireFleetRead, (req, res) => {
+  const models = fleetModels();
+  const overrides = roleOverrides();
+  res.json({
+    models,
+    overrides,
+    roles: assignFleetRoles(models, overrides),
+    roles_available: ROLES,
+    workers: fleet.roster().map((worker) => {
+      const workerRoles = assignFleetRoles(models, overrides)
+        .filter(entry => ((worker.capabilities || {}).models || []).includes(entry.model));
+      return {
+        id: worker.id,
+        name: worker.name,
+        status: worker.status,
+        age_ms: worker.age_ms,
+        is_self: worker.id === SELF_ID,
+        models: (worker.capabilities || {}).models || [],
+        roles: [...new Set(workerRoles.map(entry => entry.role))],
+        load: countActiveByWorker()[worker.id] || 0,
+      };
+    }),
+    parallel: Math.max(1, Math.min(Number(process.env.SPRINT_PARALLEL || 3) || 3, 4)),
+    templates: STAGE_TEMPLATES,
+  });
+});
+
+app.put('/api/automations/roles', fleetRateLimit, requireFleetAction, (req, res) => {
+  const input = (req.body && req.body.overrides) || {};
+  const clean = {};
+  for (const [model, role] of Object.entries(input)) {
+    if (!model || !ROLES.includes(role)) continue;
+    clean[String(model).slice(0, 120)] = role;
+  }
+  setSetting('automation_roles', JSON.stringify(clean));
+  const models = fleetModels();
+  res.json({ overrides: clean, roles: assignFleetRoles(models, clean) });
+});
+
+app.get('/api/sprints', fleetRateLimit, requireFleetRead, (req, res) => {
+  const all = listSprints(Number(req.query.limit) || 20);
+  res.json({
+    sprints: all,
+    active: all.filter(s => s.status === 'running' || s.status === 'review' || s.status === 'paused'),
+  });
+});
+
+app.post('/api/sprints', fleetRateLimit, requireFleetAction, (req, res) => {
+  try {
+    const body = req.body || {};
+    const ids = Array.isArray(body.taskIds) ? body.taskIds.map(String).filter(Boolean) : null;
+    const tasks = ids
+      ? ids.map(getTask).filter(Boolean)
+      : (body.goalOnly ? [] : listTasks({}).filter(t => t.status === 'todo' || t.status === 'in_progress'));
+    const sprint = sprints.create({
+      goal: body.goal,
+      tasks,
+      template: body.template,
+      stages: body.stages,
+      durationHours: body.durationHours,
+      models: fleetModels(),
+      overrides: roleOverrides(),
+    });
+    res.status(201).json(sprints.status(sprint.id));
+  } catch (err) { res.status(err.status || 400).json({ error: err.message }); }
+});
+
+app.get('/api/sprints/:id', fleetRateLimit, requireFleetRead, (req, res) => {
+  try {
+    const state = sprints.status(req.params.id);
+    res.json({
+      ...state,
+      tasks: state.steps.map(s => s.task_id).filter(Boolean).map(getTask).filter(Boolean),
+    });
+  } catch (err) { res.status(err.status || 404).json({ error: err.message }); }
+});
+
+for (const action of ['start', 'resume', 'pause', 'stop']) {
+  app.post('/api/sprints/:id/' + action, fleetRateLimit, requireFleetAction, (req, res) => {
+    try { res.json({ sprint: sprints[action](req.params.id) }); }
+    catch (err) { res.status(err.status || 400).json({ error: err.message }); }
+  });
+}
+
+app.get('/api/sprints/:id/feed', fleetRateLimit, requireFleetRead, (req, res) => {
+  try {
+    const sprint = getSprint(req.params.id);
+    if (!sprint) return res.status(404).json({ error: 'sprint not found' });
+    res.json({ feed: listSprintFeed({ sprintId: sprint.id, kind: req.query.kind, limit: req.query.limit }) });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+app.post('/api/sprints/:id/steps/:stepId/approve', fleetRateLimit, requireFleetAction, (req, res) => {
+  try {
+    const body = req.body || {};
+    const sprint = sprints.approve(req.params.id, req.params.stepId, {
+      approve: body.approve !== false,
+      note: body.note,
+    });
+    res.json({ sprint });
+  } catch (err) { res.status(err.status || 400).json({ error: err.message }); }
+});
+
+app.post('/api/sprints/:id/steps/:stepId/retry', fleetRateLimit, requireFleetAction, (req, res) => {
+  try { res.json({ sprint: sprints.retry(req.params.id, req.params.stepId) }); }
+  catch (err) { res.status(err.status || 400).json({ error: err.message }); }
 });
 
 // Persisted node/exposure state plus live counts, so a restart keeps the same picture.
@@ -1435,7 +1855,7 @@ app.get('/api/calendar', fleetRateLimit, (req, res) => {
 app.get('/today', (req, res) => {
   if (ROLE === 'worker' && MASTER_URL) return res.redirect(302, `${MASTER_URL}/today`);
   const info = fleet.today();
-  res.redirect(302, info.link || '/');
+  res.redirect(302, info.link || '/dashboard');
 });
 
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
@@ -1459,12 +1879,14 @@ if (ROLE === 'master') {
     try { fleet.expireStale(); } catch (err) { console.warn('Rotation check failed:', err.message); }
   }, 30000);
   rotateTimer.unref?.();
-  const probeTimer = setInterval(() => {
-    probeCapabilities({ ollamaUrl: OLLAMA_URL, kiloUrl: KILO_URL })
-      .then((caps) => fleet.setCapabilities(caps))
-      .catch(() => {});
-  }, 60000);
-  probeTimer.unref?.();
+
+  // Sprint loop: one step per sprint per tick, resumed from the SQLite checkpoint
+  // after a restart. Never blocks the HTTP server.
+  try { sprints.resetInterrupted(); } catch (err) { console.warn('Sprint recovery failed:', err.message); }
+  const sprintTimer = setInterval(() => {
+    sprints.tick().catch(err => console.warn('Sprint tick failed:', err.message));
+  }, 5000);
+  sprintTimer.unref?.();
 } else if (MASTER_URL) {
   startWorkerHeartbeat({
     masterUrl: MASTER_URL,
@@ -1484,6 +1906,26 @@ if (ROLE === 'master') {
 } else {
   console.warn('NODE_ROLE=worker without MASTER_URL: running standalone');
 }
+
+// Every role re-probes its own engines: a Kilo/Ollama that starts (or finishes
+// installing a model) after boot must become dispatchable without a restart.
+const capabilityProbeTimer = setInterval(() => {
+  probeCapabilities({ ollamaUrl: OLLAMA_URL, kiloUrl: KILO_URL })
+    .then((caps) => {
+      const before = fleet.getCapabilities();
+      const changed = before.kilo !== caps.kilo
+        || before.ollama !== caps.ollama
+        || (before.models || []).length !== (caps.models || []).length;
+      fleet.setCapabilities(caps);
+      if (changed) {
+        const label = [caps.kilo ? 'kilo' : null, caps.ollama ? `ollama (${caps.models.length} models)` : null]
+          .filter(Boolean).join(' + ') || 'no local engines';
+        console.log(`Capabilities now: ${label}`);
+      }
+    })
+    .catch(() => {});
+}, 60000);
+capabilityProbeTimer.unref?.();
 
 // -------------------------------------------------------------
 // Persisted state
@@ -1511,8 +1953,8 @@ async function ensureKilo() {
     if (r.ok) return;
   } catch {}
   try {
-    const exe = process.env.KILO_EXE || 'kilo';
-    spawn(exe, ['serve', '--port', '7777', '--hostname', '127.0.0.1'], { detached: true, stdio: 'ignore' }).unref();
+const exe = process.env.KILO_EXE || 'kilo';
+    spawn(exe, ['serve', '--port', '7777', '--hostname', '127.0.0.1'], { detached: true, stdio: 'ignore', shell: true }).unref();
     console.log('Kilo: started kilo serve');
   } catch (err) {
     console.warn('Kilo: could not start kilo serve:', err.message);
@@ -1528,6 +1970,13 @@ kiloRuns.restore()
   .catch((err) => console.warn('Kilo run restore failed:', err.message));
 
 const server = createServer(app);
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} is already in use. Another Computera instance is probably running; stop it or set PORT.`);
+    process.exit(1);
+  }
+  console.error('HTTP server error:', err.message);
+});
 server.listen(PORT, '0.0.0.0', () => {
   const { port } = server.address();
   console.log(`Web app running on http://0.0.0.0:${port}`);

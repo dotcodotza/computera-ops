@@ -105,6 +105,11 @@ export async function startMockKilo({ gapMs = 1500, tailMs = 400, promptDelayMs 
     if (req.method === 'GET' && messages) {
       return send(200, sessionOf(messages[1]).messages);
     }
+    const session = url.pathname.match(/^\/session\/([^/]+)$/);
+    if (req.method === 'GET' && session) {
+      if (!sessions.has(session[1])) return send(404, { error: 'session not found' });
+      return send(200, { id: session[1], title: 'mock' });
+    }
     send(404, { error: 'not found' });
   });
 

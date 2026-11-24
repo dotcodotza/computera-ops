@@ -12,6 +12,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
   <link rel="stylesheet" href="/app/app.css">
   <link rel="stylesheet" href="/app/studio.css">
+  <link rel="stylesheet" href="/app/shell.css">
 </head>
 <body>
 
@@ -100,11 +101,16 @@
           <option value="it">🛠️ IT</option>
           <option value="admin">🗂️ Admin</option>
           <option value="marketing">📣 Marketing</option>
+          <option value="orchestrator">🎛️ Orchestrator</option>
+          <option value="fleet">🧭 Fleet</option>
           <option value="code">💻 Code</option>
           <option value="plan">📋 Plan</option>
         </select>
-        <a class="btn btn-sm btn-secondary" href="/chat" title="Chat without the document pane">💬 Chat</a>
-        <a class="btn btn-sm btn-secondary" href="/dashboard" title="Ops dashboard: calendar & tasks">📅 Dashboard</a>
+        <div class="page-nav">
+          <a href="/dashboard" title="Ops dashboard"><span class="ico">📅</span><span class="label">Ops</span></a>
+          <a href="/chat" title="Chat without the document pane"><span class="ico">💬</span><span class="label">Chat</span></a>
+          <a href="/studio" class="on" title="Chat beside the POV document editor"><span class="ico">🖥️</span><span class="label">Studio</span></a>
+        </div>
         <button class="btn btn-sm btn-secondary" onclick="clearCurrentChat()" title="Clear Chat">🗑️ Clear</button>
       </div>
     </header>
@@ -172,8 +178,13 @@
       <!-- Right: POV (pdfcraft) -->
       <div id="pov-panel">
         <div id="pov-header">
-          <div id="pov-doc-title">No document</div>
-          <div id="pov-status"></div>
+          <div class="pov-title">
+            <span class="pov-badge">📄</span>
+            <div class="pov-meta">
+              <div id="pov-doc-title">No PDF open</div>
+              <div id="pov-status" title="POV saves back into the open workspace file; if the AI changes it on disk, this pane reloads it.">Open a PDF from Files, or drop one in.</div>
+            </div>
+          </div>
           <div class="doc-actions">
             <button class="btn btn-sm btn-secondary" id="pov-reload" title="Load the workspace copy into POV">↻ Reload</button>
             <button class="btn btn-sm btn-secondary" id="pov-upload" title="Upload a PDF (e.g. one POV downloaded) into the workspace">⬆ Upload</button>
@@ -189,7 +200,6 @@
           </div>
         </div>
         <iframe id="pov-frame" title="POV document editor" src="about:blank"></iframe>
-        <div class="pov-hint">POV saves back into the open workspace file. If the AI (or another editor) changes it on disk, this pane reloads it.</div>
         <input type="file" id="pov-upload-input" accept="application/pdf,.pdf" style="display:none;">
       </div>
     </div>

@@ -373,10 +373,10 @@ if ($StartServices) {
     Wait-ForPort -Port 7777 -TimeoutSeconds 60
     
     Start-Service -Name "computera-app" -ErrorAction SilentlyContinue
-    Wait-ForPort -Port 3001 -TimeoutSeconds 60
+    Wait-ForPort -Port 3000 -TimeoutSeconds 60
     
     Write-Log "All services started!"
-    Write-Log "Computera: http://localhost:3001"
+    Write-Log "Computera: http://localhost:3000"
     Write-Log "Kilo:      http://127.0.0.1:7777"
     Write-Log "Ollama:    http://localhost:11434"
 }

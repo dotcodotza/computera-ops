@@ -1,0 +1,173 @@
+/* Shared shell polish: loaded by every page after its own stylesheet so the ops
+   dashboard, chat and studio read as one product. Only presentation lives here. */
+
+.hidden { display: none !important; }
+
+:root {
+  --shell-accent: #7c6cff;
+  --shell-accent-2: #c084fc;
+  --shell-line: rgba(255, 255, 255, 0.08);
+}
+
+/* typed text and scrollbars */
+::selection { background: rgba(124, 108, 255, 0.35); }
+* { scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, 0.14) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.12); border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.2); background-clip: content-box; }
+
+/* top bar */
+.top-bar {
+  background: rgba(10, 12, 19, 0.72) !important;
+  backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--shell-line) !important;
+  height: 62px !important;
+}
+.brand-title { letter-spacing: -0.02em; }
+.brand-logo {
+  border-radius: 10px !important;
+  background: linear-gradient(135deg, var(--shell-accent), var(--shell-accent-2)) !important;
+  box-shadow: 0 8px 20px rgba(124, 108, 255, 0.4) !important;
+}
+.brand-subtitle { letter-spacing: 0.01em; }
+
+/* status pills */
+.status-badge {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--shell-line);
+  border-radius: 20px;
+  padding: 4px 9px;
+  font-size: 11px;
+  transition: border-color .2s ease, background .2s ease;
+}
+.status-badge .status-dot { box-shadow: 0 0 7px currentColor; }
+
+/* controls */
+.btn { transition: background .16s ease, border-color .16s ease, transform .12s ease, box-shadow .16s ease; }
+.btn:active { transform: translateY(1px); }
+.btn-sm { border-radius: 8px; }
+.btn-primary {
+  background: linear-gradient(135deg, var(--shell-accent), #9b7cff) !important;
+  border-color: transparent !important;
+  box-shadow: 0 8px 20px rgba(124, 108, 255, 0.3);
+}
+.btn-primary:hover { filter: brightness(1.08); box-shadow: 0 10px 24px rgba(124, 108, 255, 0.4) !important; }
+.btn-icon { border-radius: 9px; }
+.model-selector {
+  background: #141824 !important;
+  border-color: var(--shell-line) !important;
+  border-radius: 9px !important;
+  transition: border-color .16s ease;
+}
+.model-selector:focus { border-color: rgba(124, 108, 255, 0.6) !important; }
+
+/* segmented page nav, shared by chat and studio */
+.page-nav {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid var(--shell-line);
+}
+.page-nav a {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  line-height: 1.2;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #98a2b8;
+  transition: color .16s ease, background .16s ease, box-shadow .16s ease;
+  white-space: nowrap;
+}
+.page-nav a:hover { color: #eef1f8; background: rgba(255, 255, 255, 0.06); }
+.page-nav a.on {
+  color: #fff;
+  background: linear-gradient(135deg, rgba(124, 108, 255, 0.45), rgba(192, 132, 252, 0.28));
+  box-shadow: 0 4px 12px rgba(124, 108, 255, 0.22);
+}
+
+/* sidebar + chat surfaces */
+#sidebar {
+  background: linear-gradient(180deg, #0f121b, #0b0e16) !important;
+  border-right: 1px solid var(--shell-line) !important;
+}
+.sidebar-tab { transition: color .16s ease, background .16s ease; border-radius: 8px; }
+.sidebar-tab:hover { background: rgba(255, 255, 255, 0.04); }
+.sidebar-tab.active { color: #c4b5fd !important; }
+.sidebar-header { border-bottom: 1px solid var(--shell-line); }
+.messages-container {
+  background:
+    radial-gradient(900px 520px at 18% -10%, rgba(124, 108, 255, 0.09), transparent 60%),
+    #0b0e16 !important;
+}
+.message-row { animation: shell-rise .22s ease both; }
+@keyframes shell-rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.message-row.assistant .message-content {
+  border-radius: 14px 14px 14px 4px !important;
+  border-color: var(--shell-line) !important;
+}
+.message-row.user .message-content { border-radius: 14px 14px 4px 14px !important; }
+.input-section {
+  background: linear-gradient(180deg, rgba(11, 14, 22, 0), #0f121b 45%) !important;
+  border-top: 1px solid var(--shell-line) !important;
+}
+#chat-input {
+  border-radius: 14px !important;
+  border-color: var(--shell-line) !important;
+  transition: border-color .16s ease, box-shadow .16s ease;
+}
+#chat-input:focus {
+  border-color: rgba(124, 108, 255, 0.55) !important;
+  box-shadow: 0 0 0 3px rgba(124, 108, 255, 0.1);
+}
+.welcome-icon {
+  background: linear-gradient(135deg, var(--shell-accent), var(--shell-accent-2)) !important;
+  box-shadow: 0 12px 34px rgba(124, 108, 255, 0.4) !important;
+}
+.welcome-title { letter-spacing: -0.03em; }
+.modal-box { border-radius: 16px !important; border-color: var(--shell-line) !important; box-shadow: 0 30px 70px rgba(0, 0, 0, 0.55) !important; }
+.modal-header { border-bottom: 1px solid var(--shell-line) !important; }
+.modal-footer { border-top: 1px solid var(--shell-line) !important; }
+.task-banner { border-bottom: 1px solid var(--shell-line) !important; }
+.drop-zone { transition: border-color .16s ease, background .16s ease; }
+.drop-zone:hover { border-color: rgba(124, 108, 255, 0.5) !important; background: rgba(124, 108, 255, 0.06); }
+
+/* studio panes */
+#pov-header { border-bottom: 1px solid var(--shell-line) !important; }
+#split-handle:hover { background: rgba(124, 108, 255, 0.4) !important; }
+
+/* keep the header on one line as the window narrows: drop decoration, not controls */
+.top-bar { gap: 10px; padding: 0 14px !important; }
+.top-bar h1, .brand-title { white-space: nowrap; }
+.brand-section { min-width: 0; }
+.brand-subtitle {
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nav-actions { display: flex; align-items: center; gap: 7px; flex-wrap: nowrap; min-width: 0; }
+.nav-actions .status-badge, .nav-actions .btn { flex: 0 0 auto; }
+.nav-actions #header-model-select { max-width: 165px; }
+.nav-actions #kilo-agent-select { max-width: 140px; }
+
+@media (max-width: 1400px) {
+  .brand-subtitle { display: none; }
+}
+@media (max-width: 1240px) {
+  .page-nav a .label { display: none; }
+  .page-nav a { padding: 5px 8px; }
+}
+@media (max-width: 1080px) {
+  .top-bar .status-badge { display: none; }
+  .nav-actions #header-model-select { max-width: 150px; }
+  .nav-actions #kilo-agent-select { max-width: 112px; }
+}
+@media (max-width: 900px) {
+  .page-nav { display: none; }
+}

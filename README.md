@@ -88,6 +88,7 @@ Environment variables (optional):
 - `PORT`: Server port (default: `3000`)
 - `OLLAMA_URL`: URL to your Ollama instance (default: `http://localhost:11434`)
 - `ALLOWED_FS_ROOTS`: Semicolon-separated paths allowed for filesystem operations.
+- `EXA_API_KEY`: [Exa](https://exa.ai) key for web search. Empty disables `POST /api/web/search` and the chat agent's `web_search` tool (they answer 503).
 
 ---
 
@@ -103,7 +104,7 @@ both, or neither — and the master dispatches each task only to a node that can
 # .env
 NODE_ROLE=master
 FLEET_TOKEN=<shared secret>
-PORT=3001
+PORT=3000
 ```
 
 ### 2. Each worker
@@ -111,7 +112,7 @@ PORT=3001
 ```bash
 # .env
 NODE_ROLE=worker
-MASTER_URL=http://<master-lan-ip>:3001
+MASTER_URL=http://<master-lan-ip>:3000
 FLEET_TOKEN=<same shared secret>
 WORKER_NAME=Desk 2
 PORT=3002

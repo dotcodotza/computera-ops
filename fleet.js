@@ -43,11 +43,69 @@ export function createFleet(options = {}) {
     selfName = 'masternode',
     runLocalTask,
     onLinkToken,
+    // Optional: which capability tier a worker can serve ('pace-maker' | 'worker' |
+    // 'orchestrator'). Sprint steps carry their role as the task agent, and dispatch
+    // prefers workers that can serve it so a sustained sprint pools the whole fleet.
+    roleForWorker = null,
     staleMs = DEFAULT_STALE_MS,
+    breakerThreshold = 2,
+    breakerCooldownMs = 30000,
+    breakerMaxCooldownMs = 300000,
+    now = () => Date.now(),
     log = console,
   } = options;
 
   let selfCapabilities = { kilo: false, ollama: false, models: [] };
+
+  // Circuit breaker per worker: after repeated dispatch failures a node is taken
+  // out of rotation for a growing cooldown instead of being retried every time.
+  const breaker = new Map();
+
+  function breakerEntry(id) {
+    const key = String(id || '');
+    if (!breaker.has(key)) breaker.set(key, { failures: 0, openUntil: 0, cooldownMs: 0, lastError: null });
+    return breaker.get(key);
+  }
+
+  function circuitOpen(id) {
+    return breakerEntry(id).openUntil > now();
+  }
+
+  function noteFailure(id, error) {
+    const entry = breakerEntry(id);
+    entry.failures += 1;
+    entry.lastError = error || null;
+    if (entry.failures >= breakerThreshold) {
+      entry.cooldownMs = Math.min(breakerMaxCooldownMs, entry.cooldownMs ? entry.cooldownMs * 2 : breakerCooldownMs);
+      entry.openUntil = now() + entry.cooldownMs;
+      store.recordEvent(
+        'circuit_open',
+        `${id} cooling down ${Math.round(entry.cooldownMs / 1000)}s after ${entry.failures} failure(s)`,
+        id,
+      );
+    }
+  }
+
+  function noteSuccess(id) {
+    const entry = breakerEntry(id);
+    entry.failures = 0;
+    entry.cooldownMs = 0;
+    entry.openUntil = 0;
+    entry.lastError = null;
+  }
+
+  function health() {
+    const out = {};
+    for (const [id, entry] of breaker) {
+      out[id] = {
+        failures: entry.failures,
+        open: entry.openUntil > now(),
+        reopenInMs: Math.max(0, entry.openUntil - now()),
+        lastError: entry.lastError,
+      };
+    }
+    return out;
+  }
 
   function setCapabilities(capabilities) {
     selfCapabilities = capabilities || {};
@@ -134,6 +192,14 @@ export function createFleet(options = {}) {
     store.touchWorker(selfId, { capabilities: selfCapabilities });
     const workers = store.listWorkers({ staleMs });
     let entry = store.getRotation(date);
+
+    // This node's own address changes when its tunnel restarts. Keep today's
+    // entry pointing at the URL it advertises now, without rotating the token.
+    if (entry && entry.worker_id === selfId && hostUrl && entry.host_url !== hostUrl) {
+      entry = store.saveRotation({ date, worker_id: selfId, host_url: hostUrl, link_token: entry.link_token });
+      store.recordEvent('host_url', `host url is now ${hostUrl}`, selfId);
+    }
+
     const current = entry ? workers.find(w => w.id === entry.worker_id) : null;
     const hostOffline = !!entry && (!current || current.status !== 'online');
     let kind = null;
@@ -166,12 +232,16 @@ export function createFleet(options = {}) {
     const entry = ensureRotation();
     const workers = store.listWorkers({ staleMs });
     const worker = entry ? workers.find(w => w.id === entry.worker_id) : null;
+    const base = String(entry?.host_url || '').replace(/\/+$/, '');
+    const token = entry?.link_token || null;
     return {
       date: entry?.date || todayKey(),
       worker: worker ? { id: worker.id, name: worker.name, base_url: worker.base_url, status: worker.status } : null,
       host_url: entry?.host_url || '',
-      link: entry?.host_url || '',
-      link_token: entry?.link_token || null,
+      // The shareable link has to carry today's token: the bare host 401s behind
+      // the public gate, which is what made the copied link unusable.
+      link: base ? `${base}/dashboard${token ? '?t=' + encodeURIComponent(token) : ''}` : '',
+      link_token: token,
       is_self: !!entry && entry.worker_id === selfId,
     };
   }
@@ -212,21 +282,52 @@ export function createFleet(options = {}) {
 
     const need = task.needs || 'any';
     const load = store.countActiveByWorker();
-    const candidates = roster()
-      .filter(w => w.id !== selfId && capable(w, need))
+    const allCandidates = roster().filter(w => w.id !== selfId && capable(w, need));
+    const cooling = allCandidates.filter(w => circuitOpen(w.id));
+    if (cooling.length) {
+      store.recordEvent(
+        'dispatch_skipped',
+        `${cooling.length} worker(s) in cooldown: ${cooling.map(w => w.id).join(', ')}`,
+        cooling.map(w => w.id).join(','),
+      );
+    }
+    const candidates = allCandidates
+      .filter(w => !circuitOpen(w.id))
       .sort((a, b) => (load[a.id] || 0) - (load[b.id] || 0) || String(a.id).localeCompare(String(b.id)));
 
+    // Role-aware pooling: sprint stages ask for a tier (task.agent is the role) and
+    // are routed to workers that actually serve it. If no worker serves that tier,
+    // every capable worker stays eligible rather than the task failing.
+    const wantRole = ['pace-maker', 'worker', 'orchestrator'].includes(String(task.agent || ''))
+      ? task.agent
+      : null;
+    const roleCandidates = wantRole && typeof roleForWorker === 'function'
+      ? candidates.filter(w => roleForWorker(w) === wantRole)
+      : [];
+    const pool = roleCandidates.length ? roleCandidates : candidates;
+    if (wantRole && roleCandidates.length) {
+      store.recordEvent(
+        'dispatch_pool',
+        `${taskId.slice(0, 8)} pooled for ${wantRole} on ${roleCandidates.map(w => w.name).join(', ')}`,
+        roleCandidates.map(w => w.id).join(','),
+      );
+    }
+
     // Deterministic tie-break so identical loads do not always favour the same worker.
-    const offset = candidates.length ? taskId.charCodeAt(0) % candidates.length : 0;
-    const ordered = [...candidates.slice(offset), ...candidates.slice(0, offset)];
+    const offset = pool.length ? taskId.charCodeAt(0) % pool.length : 0;
+    const ordered = [...pool.slice(offset), ...pool.slice(0, offset)];
 
     store.updateTask(taskId, { needs: task.needs, blocked_reason: null });
 
     for (const worker of ordered.slice(0, Math.max(1, Math.min(2, ordered.length)))) {
       store.updateTask(taskId, { assigned_worker: worker.id, status: 'in_progress' });
-      store.recordEvent('dispatch', `${taskId.slice(0, 8)} → ${worker.name}`, worker.id);
+      store.recordEvent('dispatch', `${taskId.slice(0, 8)} → ${worker.name}${wantRole ? ' (' + wantRole + ')' : ''}`, worker.id);
       const result = await callWorker(worker, task);
-      if (result.ok) return finish(taskId, { workerId: worker.id, engine: result.engine, text: result.text });
+      if (result.ok) {
+        noteSuccess(worker.id);
+        return finish(taskId, { workerId: worker.id, engine: result.engine, text: result.text });
+      }
+      noteFailure(worker.id, result.error);
       store.updateTask(taskId, { attempts: (store.getTask(taskId)?.attempts || 0) + 1 });
       store.recordEvent('dispatch_failed', `${worker.name}: ${result.error}`, worker.id);
     }
@@ -246,9 +347,11 @@ export function createFleet(options = {}) {
       return { ok: false, blocked, error: local?.error || 'local run failed' };
     }
 
-    const reason = need === 'any'
-      ? 'no worker with kilo or ollama is online'
-      : `no ${need}-capable worker is online`;
+    const reason = allCandidates.length && !candidates.length
+      ? `all ${need === 'any' ? 'capable' : need + '-capable'} workers are cooling down after failures`
+      : need === 'any'
+        ? 'no worker with kilo or ollama is online'
+        : `no ${need}-capable worker is online`;
     const blocked = store.updateTask(taskId, { status: 'todo', blocked_reason: reason });
     store.recordEvent('blocked', `${taskId.slice(0, 8)} blocked: ${reason}`);
     return { ok: false, blocked, error: reason };
@@ -280,6 +383,7 @@ export function createFleet(options = {}) {
     },
     ensureRotation,
     dispatch,
+    health,
     events(limit) {
       return store.listEvents(limit);
     },

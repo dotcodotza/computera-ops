@@ -11,6 +11,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
   <link rel="stylesheet" href="/app/app.css">
+  <link rel="stylesheet" href="/app/shell.css">
 </head>
 <body>
 
@@ -99,11 +100,16 @@
           <option value="it">🛠️ IT</option>
           <option value="admin">🗂️ Admin</option>
           <option value="marketing">📣 Marketing</option>
+          <option value="orchestrator">🎛️ Orchestrator</option>
+          <option value="fleet">🧭 Fleet</option>
           <option value="code">💻 Code</option>
           <option value="plan">📋 Plan</option>
         </select>
-        <a class="btn btn-sm btn-secondary" href="/studio" title="Chat beside the POV document editor">🖥️ Studio</a>
-        <a class="btn btn-sm btn-secondary" href="/dashboard" title="Ops dashboard: calendar & tasks">📅 Dashboard</a>
+        <div class="page-nav">
+          <a href="/dashboard" title="Ops dashboard"><span class="ico">📅</span><span class="label">Ops</span></a>
+          <a href="/chat" class="on" title="Chat"><span class="ico">💬</span><span class="label">Chat</span></a>
+          <a href="/studio" title="Chat beside the POV document editor"><span class="ico">🖥️</span><span class="label">Studio</span></a>
+        </div>
         <button class="btn btn-sm btn-secondary" onclick="clearCurrentChat()" title="Clear Chat">🗑️ Clear</button>
       </div>
     </header>

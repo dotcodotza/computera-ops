@@ -333,7 +333,7 @@ Start-ServiceOrdered -ServiceNames @("computera-kilo")
 Wait-ForPort -Port 7777 -TimeoutSeconds 60
 
 Start-ServiceOrdered -ServiceNames @("computera-app")
-Wait-ForPort -Port 3001 -TimeoutSeconds 60
+Wait-ForPort -Port 3000 -TimeoutSeconds 60
 
 # Step 7: Re-enable BitLocker if it was suspended
 if ($bitlockerStatus -eq "Enabled") {

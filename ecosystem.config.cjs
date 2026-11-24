@@ -45,7 +45,7 @@ module.exports = {
       merge_logs: false,
       time: true,
       env: {
-        PORT: '3001',
+        PORT: '3000',
         OLLAMA_URL: 'http://localhost:11434',
         KILO_URL: 'http://127.0.0.1:7777',
         NODE_ROLE: 'master',
