@@ -50,10 +50,21 @@ db.exec(`
     sprint_id TEXT,
     kind TEXT NOT NULL,
     message TEXT NOT NULL DEFAULT '',
+    detail TEXT NOT NULL DEFAULT '',
+    runner TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_sprint_feed_sprint ON sprint_feed(sprint_id, created_at);
 `);
+
+// Older databases predate the verbatim event stream; add its columns in place.
+const feedColumns = new Set(db.prepare('PRAGMA table_info(sprint_feed)').all().map(c => c.name));
+for (const [name, ddl] of [
+  ['detail', "ALTER TABLE sprint_feed ADD COLUMN detail TEXT NOT NULL DEFAULT ''"],
+  ['runner', "ALTER TABLE sprint_feed ADD COLUMN runner TEXT NOT NULL DEFAULT ''"],
+]) {
+  if (!feedColumns.has(name)) db.exec(ddl);
+}
 
 function parseJson(value, fallback) {
   try {
@@ -107,9 +118,12 @@ function rowToStep(row) {
 function rowToFeed(row) {
   return {
     id: row.id,
+    seq: Number(row.seq || 0),
     sprint_id: row.sprint_id,
     kind: row.kind,
     message: row.message,
+    detail: row.detail || '',
+    runner: row.runner || '',
     created_at: row.created_at,
   };
 }
@@ -266,24 +280,38 @@ export function nextPendingStep(sprintId) {
   `).get(String(sprintId)));
 }
 
-export function addSprintFeed(sprintId, kind, message = '') {
-  db.prepare('INSERT INTO sprint_feed (id, sprint_id, kind, message, created_at) VALUES (?, ?, ?, ?, ?)')
-    .run(randomUUID(), sprintId ? String(sprintId) : null, String(kind || 'system'), String(message).slice(0, 500), new Date().toISOString());
+// `detail` keeps the harness output verbatim (the banter feed reads as a
+// transcript); `message` stays the one-line summary. A 10-hour sprint can emit
+// thousands of events, so retention is per sprint and bounded.
+export function addSprintFeed(sprintId, kind, message = '', extra = {}) {
+  const detail = extra && typeof extra === 'object' ? extra.detail : undefined;
+  const runner = extra && typeof extra === 'object' ? extra.runner : undefined;
+  db.prepare('INSERT INTO sprint_feed (id, sprint_id, kind, message, detail, runner, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(
+      randomUUID(),
+      sprintId ? String(sprintId) : null,
+      String(kind || 'system'),
+      String(message).slice(0, 500),
+      String(detail || '').slice(0, 20000),
+      String(runner || '').slice(0, 40),
+      new Date().toISOString(),
+    );
   db.prepare(`
-    DELETE FROM sprint_feed WHERE sprint_id IS :sprint_id AND id NOT IN (
-      SELECT id FROM sprint_feed WHERE sprint_id IS :sprint_id ORDER BY created_at DESC LIMIT 500
+    DELETE FROM sprint_feed WHERE sprint_id IS :sprint_id AND rowid NOT IN (
+      SELECT rowid FROM sprint_feed WHERE sprint_id IS :sprint_id ORDER BY rowid DESC LIMIT 4000
     )
   `).run({ sprint_id: sprintId ? String(sprintId) : null });
 }
 
-export function listSprintFeed({ sprintId, kind, limit = 100 } = {}) {
-  const n = Math.min(Math.max(Number(limit) || 100, 1), 500);
+export function listSprintFeed({ sprintId, kind, limit = 100, after = 0 } = {}) {
+  const n = Math.min(Math.max(Number(limit) || 100, 1), 2000);
   const clauses = [];
   const params = { limit: n };
   if (sprintId) { clauses.push('sprint_id = :sprint_id'); params.sprint_id = String(sprintId); }
   if (kind) { clauses.push('kind = :kind'); params.kind = String(kind); }
+  if (Number(after) > 0) { clauses.push('rowid > :after'); params.after = Number(after); }
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  return db.prepare(`SELECT * FROM sprint_feed ${where} ORDER BY created_at DESC LIMIT :limit`)
+  return db.prepare(`SELECT rowid AS seq, * FROM sprint_feed ${where} ORDER BY rowid DESC LIMIT :limit`)
     .all(params)
     .map(rowToFeed);
 }

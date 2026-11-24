@@ -16,6 +16,7 @@
     "pm2:delete": "pm2 delete ecosystem.config.cjs"
   },
   "dependencies": {
+    "@deepseek-ai/dsh": "^0.2.2-rc.5",
     "cors": "^2.8.5",
     "exa-js": "2.29.0",
     "express": "^4.19.2",

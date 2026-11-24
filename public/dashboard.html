@@ -276,6 +276,12 @@
     .feed-row.pace .feed-msg { color: var(--muted); font-style: italic; }
     .feed-time { margin-left: auto; font-size: 10.5px; color: var(--dim); font-family: 'JetBrains Mono', monospace; }
     .feed-list { max-height: 260px; overflow-y: auto; }
+    .feed-row { align-items: flex-start; }
+    .feed-body { flex: 1; min-width: 0; }
+    .feed-row.thinking .feed-msg { color: var(--dim); font-style: italic; }
+    .feed-row.tool .feed-msg, .feed-row.tool_result .feed-msg { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; }
+    .feed-detail { margin: 6px 0 0; padding: 8px 10px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; font-family: 'JetBrains Mono', monospace; font-size: 10.5px; line-height: 1.5; color: var(--muted); white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow: auto; }
+    .feed-toggle { background: none; border: 0; color: var(--dim); font-size: 10px; cursor: pointer; padding: 4px 0 0; }
 
     /* sprint console */
     .grid-composer { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 16px; align-items: start; }
@@ -574,7 +580,7 @@
         <div class="grid-2">
           <div class="card">
             <div class="card-head">
-              <div><h2>Pace-maker</h2><p>Separate feed — progress and banter only</p></div>
+              <div><h2>Banter feed</h2><p>The harness transcript — plan, reasoning, tools and output, verbatim</p></div>
               <span class="pill">feed</span>
             </div>
             <div class="feed-list" id="auto-pace"></div>
@@ -615,6 +621,7 @@
       sprints: [], selected: null, detail: null, roles: [], workers: [],
       templates: {}, parallel: 1, sprintFilter: '',
       composer: { template: 'generic', hours: 10, source: 'open' },
+      runner: null, lastFeed: [], openFeed: new Set(),
     },
   };
 
@@ -1130,6 +1137,7 @@
       state.auto.workers = meta.workers || [];
       state.auto.templates = meta.templates || {};
       state.auto.parallel = meta.parallel || 1;
+      state.auto.runner = meta.runner || null;
       state.auto.sprints = list.sprints || [];
       renderComposer();
       renderPool();
@@ -1172,9 +1180,11 @@
     const poolPill = document.getElementById('sp-workers');
     if (poolPill) poolPill.textContent = (state.auto.workers || []).filter(w => w.status === 'online').length + ' online';
     const offline = (state.auto.workers || []).filter(w => w.status !== 'online').length;
-    document.getElementById('sp-hint').textContent = state.auto.composer.source === 'open'
+    const runnerLabel = state.auto.runner ? (state.auto.runner.active || 'none') : 'auto';
+    const runnerNote = ' · runner: ' + runnerLabel;
+    document.getElementById('sp-hint').textContent = (state.auto.composer.source === 'open'
       ? open + ' open task' + (open === 1 ? '' : 's') + ' · ' + state.auto.parallel + ' steps in parallel · ' + offline + ' worker(s) offline'
-      : 'Topic-only sprint · ' + state.auto.parallel + ' steps in parallel';
+      : 'Topic-only sprint · ' + state.auto.parallel + ' steps in parallel') + runnerNote;
   }
 
   function renderPool() {
@@ -1440,34 +1450,58 @@
     }).join('');
   }
 
+  // One feed row, with the full harness output available on demand. `message` is
+  // the one-line summary; `detail` is the verbatim text/tool payload.
+  function feedRowHtml(f) {
+    const kind = f.kind || 'system';
+    const seq = String(f.seq || f.id || '');
+    const detail = String(f.detail || '');
+    const message = String(f.message || '');
+    const long = detail.trim() && detail.trim() !== message.trim();
+    const open = state.auto.openFeed.has(seq);
+    return '<div class="feed-row ' + attr(kind) + '">' +
+      '<span class="feed-kind">' + escapeHtml(kind) + '</span>' +
+      '<div class="feed-body">' +
+        '<div class="feed-msg">' + escapeHtml(message) + '</div>' +
+        (long ? (open
+          ? '<pre class="feed-detail">' + escapeHtml(detail) + '</pre>' +
+            '<button class="feed-toggle" onclick="toggleFeedDetail(\'' + attr(seq) + '\')">hide</button>'
+          : '<button class="feed-toggle" onclick="toggleFeedDetail(\'' + attr(seq) + '\')">show ' + detail.length + ' chars</button>') : '') +
+      '</div>' +
+      '<span class="feed-time">' + escapeHtml(timeOf(f.created_at)) + '</span>' +
+    '</div>';
+  }
+
+  function toggleFeedDetail(seq) {
+    seq = String(seq);
+    if (state.auto.openFeed.has(seq)) state.auto.openFeed.delete(seq);
+    else state.auto.openFeed.add(seq);
+    renderFeeds(state.auto.lastFeed || []);
+  }
+
+  const SUMMARY_KINDS = new Set(['system', 'stage', 'approval', 'error', 'result', 'runner', 'prompt', 'tool_error']);
+
   function renderFeeds(feed) {
-    const activity = (feed || []).filter(f => f.kind !== 'pace');
+    state.auto.lastFeed = feed || [];
     const paceBox = document.getElementById('auto-pace');
     const actBox = document.getElementById('auto-activity');
     if (!paceBox || !actBox) return;
-    // Replace banter feed with live SSE stream of the selected sprint's steps.
-    if (state.auto && state.auto.selected) {
-      if (window._paceEs) { try { window._paceEs.close(); } catch (e) {} }
-      const es = new EventSource('/api/sprints/' + state.auto.selected + '/stream?t=' + encodeURIComponent((state.fleet.today || {}).link_token || ''));
-      window._paceEs = es;
-      paceBox.innerHTML = '<div class="empty"><span class="big">📡</span>Live stream connecting…</div>';
-      es.onmessage = function (ev) {
-        try {
-          const d = JSON.parse(ev.data);
-          const lines = (d.steps || []).map(s =>
-            '<div class="feed-row"><span class="feed-kind">' + escapeHtml(s.stage) + '</span>' +
-            '<span class="feed-msg">' + escapeHtml((s.output || s.status || '').slice(0, 200)) + '</span></div>'
-          ).join('');
-          paceBox.innerHTML = lines || '<div class="empty"><span class="big">📡</span>Waiting for output…</div>';
-        } catch (e) {}
-      };
-      es.addEventListener('close', function () { es.close(); window._paceEs = null; });
-    } else {
-      paceBox.innerHTML = '<div class="empty"><span class="big">📡</span>No active sprint stream.</div>';
-    }
+
+    // The banter feed is the harness transcript, verbatim and in order: the plan,
+    // the reasoning, every tool call and result, then the answer. Newest at the
+    // bottom, like a conversation, and it stays pinned there unless scrolled up.
+    const transcript = (feed || []).slice().reverse();
+    const atBottom = paceBox.scrollHeight - paceBox.scrollTop - paceBox.clientHeight < 48;
+    paceBox.innerHTML = transcript.length
+      ? transcript.map(feedRowHtml).join('')
+      : '<div class="empty"><span class="big">📡</span>Waiting for the harness to say something…</div>';
+    if (atBottom) paceBox.scrollTop = paceBox.scrollHeight;
+
+    const activity = (feed || []).filter(f => SUMMARY_KINDS.has(f.kind));
     actBox.innerHTML = activity.length
       ? activity.slice(0, 40).map(f =>
-          '<div class="feed-row"><span class="feed-kind">' + escapeHtml(f.kind) + '</span><span class="feed-msg">' + escapeHtml(f.message) + '</span>' +
+          '<div class="feed-row"><span class="feed-kind">' + escapeHtml(f.kind) + '</span>' +
+          '<span class="feed-msg">' + escapeHtml(f.message) + '</span>' +
           '<span class="feed-time">' + escapeHtml(timeOf(f.created_at)) + '</span></div>').join('')
       : '<div class="empty"><span class="big">🎛️</span>No sprint activity yet.</div>';
   }

@@ -273,7 +273,9 @@ export function createFleet(options = {}) {
       last_run_at: new Date().toISOString(),
     });
     store.recordEvent('dispatch_ok', `${taskId.slice(0, 8)} finished on ${workerId} via ${engine || 'engine'}`, workerId);
-    return updated;
+    // Callers (the dispatch route and sprint steps) treat this as an outcome, so
+    // report success explicitly instead of relying on the task's fields.
+    return { ...updated, ok: true, task: updated, text: text || '', engine: engine || null, assigned_worker: workerId };
   }
 
   async function dispatch(taskId) {

@@ -150,6 +150,9 @@ export function createSprints(options = {}) {
   if (!store) throw new Error('createSprints needs a store');
 
   const inFlight = new Set();
+  // One controller per sprint, so pause/stop interrupts a step that is already
+  // running (a harness step can be hours long) instead of waiting for it.
+  const aborts = new Map();
   let ticking = false;
   // Steps of different source tasks are independent, so several can run at once on
   // different workers. Stages of the same task stay sequential.
@@ -272,6 +275,8 @@ export function createSprints(options = {}) {
     }
     if (!store.listSprintSteps(sprint.id).length) throw fail('sprint has no steps');
 
+    aborts.get(sprint.id)?.abort();
+    aborts.set(sprint.id, new AbortController());
     const updated = store.updateSprint(sprint.id, {
       status: 'running',
       started_at: sprint.started_at || iso(),
@@ -286,6 +291,7 @@ export function createSprints(options = {}) {
     const sprint = requireSprint(id);
     if (sprint.status !== 'running') throw fail(`cannot pause a ${sprint.status} sprint`);
     const updated = store.updateSprint(sprint.id, { status: 'paused' });
+    aborts.get(sprint.id)?.abort();
     feed(sprint.id, 'system', 'Sprint paused');
     return updated || sprint;
   }
@@ -302,6 +308,7 @@ export function createSprints(options = {}) {
     const sprint = requireSprint(id);
     if (sprint.status === 'done' || sprint.status === 'stopped') return sprint;
     const updated = store.updateSprint(sprint.id, { status: 'stopped', finished_at: iso() });
+    aborts.get(sprint.id)?.abort();
     feed(sprint.id, 'system', 'Sprint stopped by operator');
     return updated || sprint;
   }
@@ -315,13 +322,18 @@ export function createSprints(options = {}) {
     }
     feed(sprint.id, 'system', `${step.stage} started (${step.role})`);
 
+    const signal = aborts.get(sprint.id)?.signal;
     try {
       const previous = store.listSprintSteps(sprint.id).filter(s =>
         s.source_task_id === step.source_task_id
         && s.status === 'done'
         && s.position < step.position);
-      const result = await runStep(step, sprint, { previous, sprint });
-      if (result && result.ok && String(result.text || '').trim()) {
+      const result = await runStep(step, sprint, { previous, sprint, signal });
+      if (signal?.aborted) {
+        // Interrupted, not failed: put the stage back so resume re-runs it.
+        store.updateSprintStep(step.id, { status: 'pending', error: null });
+        feed(sprint.id, 'system', `${step.stage} interrupted — queued for the next run`);
+      } else if (result && result.ok && String(result.text || '').trim()) {
         store.updateSprintStep(step.id, { status: 'done', output: String(result.text), error: null });
         feed(sprint.id, 'stage', `${step.stage} finished (${step.role})`);
         feed(sprint.id, 'pace', paceLine(step, sprint));
@@ -332,8 +344,13 @@ export function createSprints(options = {}) {
         feed(sprint.id, 'error', `${step.stage} failed: ${error}`);
       }
     } catch (err) {
-      store.updateSprintStep(step.id, { status: 'failed', error: err.message });
-      feed(sprint.id, 'error', `${step.stage} failed: ${err.message}`);
+      if (signal?.aborted) {
+        store.updateSprintStep(step.id, { status: 'pending', error: null });
+        feed(sprint.id, 'system', `${step.stage} interrupted — queued for the next run`);
+      } else {
+        store.updateSprintStep(step.id, { status: 'failed', error: err.message });
+        feed(sprint.id, 'error', `${step.stage} failed: ${err.message}`);
+      }
     } finally {
       inFlight.delete(step.id);
     }
@@ -445,7 +462,9 @@ export function createSprints(options = {}) {
     return {
       sprint,
       steps: store.listSprintSteps(sprint.id),
-      feed: typeof store.listSprintFeed === 'function' ? store.listSprintFeed({ sprintId: sprint.id }) : [],
+      // A long sprint's transcript is the point, so return the recent tail of the
+      // verbatim feed rather than the default page.
+      feed: typeof store.listSprintFeed === 'function' ? store.listSprintFeed({ sprintId: sprint.id, limit: 500 }) : [],
     };
   }
 

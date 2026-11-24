@@ -23,6 +23,9 @@ import { createFleet, probeCapabilities, startWorkerHeartbeat, todayKey } from '
 import { createKiloRuns } from './kilo-runs.js';
 import { createSprints, buildStepPrompt, assignFleetRoles, STAGE_TEMPLATES, ROLES } from './sprint.js';
 import {
+  createRunnerRegistry, createDshRunner, createFleetRunner, createPreviewGuard,
+} from './runners.js';
+import {
   createSprint, getSprint, listSprints, updateSprint, addSprintStep, listSprintSteps,
   getSprintStep, updateSprintStep, nextPendingStep, addSprintFeed, listSprintFeed,
   resetInterruptedSprints,
@@ -573,6 +576,10 @@ async function executeTool(name, args, req) {
 // -------------------------------------------------------------
 // API Endpoints
 // -------------------------------------------------------------
+
+// Cheap liveness for the sprint preview guardrail: answers while the process can
+// serve, without probing the engines that a long run may be occupying.
+app.get('/api/ping', (req, res) => res.json({ ok: true, role: ROLE, at: new Date().toISOString() }));
 
 // Health check: one call tells an operator what this node can do right now.
 app.get('/api/health', async (req, res) => {
@@ -1831,56 +1838,123 @@ function roleForWorker(worker) {
   return ['orchestrator', 'worker', 'pace-maker'].find(role => served.has(role)) || null;
 }
 
-// A sprint step is a real child task, so it runs through the same capability-aware
-// dispatch, keeps its run output, and stays in the task list as an audit trail.
+// --- Sprint runner: the DSH harness, wired into Computera --------------------
+// Sprints are the only surface that runs dsh; chat and ad-hoc tasks keep their
+// own engines. `SPRINT_RUNNER=auto` uses the harness when it is installed and
+// falls back to the fleet on a machine that does not have it.
+const SPRINT_RUNNER = String(process.env.SPRINT_RUNNER || 'auto').toLowerCase();
+
+// Preview stability guardrail: an unattended 10-hour run must not take the node
+// down with it. The app's own health endpoint is checked before the run and every
+// 15s after that; repeated failures abort the run.
+const previewGuard = createPreviewGuard({
+  // Liveness, not engine health: /api/health probes Ollama and Kilo, which are
+  // busily answering the very run the guard is watching, so it can time out.
+  url: `http://127.0.0.1:${PORT}/api/ping`,
+  timeoutMs: 8000,
+  failuresToAbort: Number(process.env.PREVIEW_GUARD_FAILURES || 3),
+});
+
+const sprintRunners = createRunnerRegistry();
+sprintRunners.register(createDshRunner({
+  workdir: process.env.DSH_WORKDIR || __dirname,
+  previewGuard,
+}));
+sprintRunners.register(createFleetRunner({ dispatch: (taskId) => fleet.dispatch(taskId) }));
+
+function sprintRunnerInfo() {
+  const active = sprintRunners.resolve(SPRINT_RUNNER);
+  return {
+    preference: SPRINT_RUNNER,
+    active: active ? active.name : null,
+    runners: sprintRunners.describe(),
+  };
+}
+
+let liveFlush = { id: null, at: 0 };
+
+// A sprint step is a real child task, so its output survives in the task list as
+// an audit trail. Every runner event also goes into the sprint feed verbatim: the
+// feed is the window into a long run, not a summary of it.
 async function runSprintStep(step, sprint, context = {}) {
   const prompt = buildStepPrompt(step, sprint, context);
-  // Every engine is eligible; the role tier is expressed through dispatch, not by
-  // excluding Ollama-only workers from orchestration stages.
-  const needs = 'any';
+  const runner = sprintRunners.resolve(SPRINT_RUNNER);
+  if (!runner) return { ok: false, error: 'no sprint runner is configured' };
 
   if (step.task_id) {
     try {
       const task = getTask(step.task_id);
-      updateTask(step.task_id, { description: prompt, status: 'in_progress', blocked_reason: null, needs: task?.needs || 'any' });
+      updateTask(step.task_id, {
+        description: prompt,
+        status: 'in_progress',
+        blocked_reason: null,
+        assigned_worker: runner.name,
+        needs: task?.needs || 'any',
+      });
     } catch (err) {
       return { ok: false, error: 'could not prepare the step task: ' + err.message };
     }
-    const outcome = await fleet.dispatch(step.task_id);
-    if (!outcome || !outcome.ok) return { ok: false, error: (outcome && outcome.error) || 'dispatch failed' };
-    const task = getTask(step.task_id);
-    const text = task && task.result ? String(task.result) : '';
-    if (!text.trim()) return { ok: false, error: 'step produced no output' };
-    return { ok: true, text };
   }
 
-  const local = await runTaskOnLocalEngine({
-    id: step.id,
-    title: step.stage + ': ' + (step.source_title || sprint.goal),
-    description: prompt,
-    agent: step.role,
-    needs,
-  }, { onDelta: context.onDelta });
-  return local.ok ? { ok: true, text: local.text } : { ok: false, error: local.error };
-}
-
-// Wrap runSprintStep so live Ollama/Kilo output is stored on the step as it
-// streams, letting the SSE stream surface it without waiting for completion.
-const runSprintStepWithStream = async (step, sprint, context = {}) => {
-  let liveText = '';
-  const result = await runSprintStep(step, sprint, {
-    ...context,
-    onDelta: (delta) => {
-      liveText += delta;
-      try {
-        if (step.task_id) {
-          updateTask(step.task_id, { result: liveText, last_run_at: new Date().toISOString() });
-        }
-      } catch { /* best effort */ }
-    },
+  addSprintFeed(sprint.id, 'prompt', `${runner.name} · ${step.stage} (${step.role})`, {
+    detail: prompt,
+    runner: runner.name,
   });
-  return result;
-};
+
+  let live = '';
+  const onEvent = (event) => {
+    if (!event) return;
+    try {
+      addSprintFeed(sprint.id, event.kind || 'system', event.message || '', {
+        detail: event.detail || '',
+        runner: runner.name,
+      });
+    } catch { /* the run must not fail because its feed row did */ }
+    if ((event.kind === 'agent' || event.kind === 'result') && event.detail) {
+      const next = String(event.detail);
+      live = live && next.startsWith(live) ? next : (live ? `${live}\n${next}` : next);
+      if (step.task_id) {
+        const stamp = Date.now();
+        if (liveFlush.id !== step.id || stamp - liveFlush.at > 1500) {
+          liveFlush = { id: step.id, at: stamp };
+          try { updateTask(step.task_id, { result: live.slice(0, 200000), last_run_at: new Date().toISOString() }); } catch { /* best effort */ }
+        }
+      }
+    }
+  };
+
+  let result;
+  try {
+    result = await runner.run({ step, sprint, prompt, onEvent, signal: context.signal });
+  } catch (err) {
+    result = { ok: false, error: err.message };
+  }
+  if (context.signal?.aborted) return { ok: false, error: 'run interrupted' };
+
+  if (result && result.ok && String(result.text || '').trim()) {
+    if (step.task_id) {
+      try {
+        updateTask(step.task_id, {
+          status: 'review',
+          result: String(result.text),
+          blocked_reason: null,
+          last_run_at: new Date().toISOString(),
+        });
+      } catch { /* the step result below is authoritative */ }
+    }
+    addSprintFeed(sprint.id, 'result', `${step.stage} finished via ${runner.name}`, {
+      detail: String(result.text).slice(0, 20000),
+      runner: runner.name,
+    });
+    return { ok: true, text: String(result.text) };
+  }
+
+  const error = (result && result.error) || 'step produced no output';
+  if (step.task_id) {
+    try { updateTask(step.task_id, { status: 'todo', blocked_reason: error, last_run_at: new Date().toISOString() }); } catch { /* best effort */ }
+  }
+  return { ok: false, error };
+}
 
 const sprints = createSprints({
   store: {
@@ -1889,7 +1963,7 @@ const sprints = createSprints({
     addSprintFeed, listSprintFeed, resetInterruptedSprints,
     createTask, getTask, updateTask,
   },
-  runStep: runSprintStepWithStream,
+  runStep: runSprintStep,
   maxParallel: Math.max(1, Math.min(Number(process.env.SPRINT_PARALLEL || 3) || 3, 4)),
 });
 
@@ -1924,6 +1998,7 @@ app.get('/api/automations/roles', fleetRateLimit, requireFleetRead, (req, res) =
     }),
     parallel: Math.max(1, Math.min(Number(process.env.SPRINT_PARALLEL || 3) || 3, 4)),
     templates: STAGE_TEMPLATES,
+    runner: sprintRunnerInfo(),
   });
 });
 
@@ -2002,8 +2077,16 @@ app.get('/api/sprints/:id/stream', fleetRateLimit, (req, res) => {
     try {
       const s = getSprint(req.params.id);
       if (!s) { res.write('event: close\ndata: {}\n\n'); clearInterval(timer); res.end(); return; }
-      const stepsWithRuns = s.steps.map(x => {
-        const step = { id: x.id, stage: x.stage, status: x.status, output: x.output, error: x.error };
+      // getSprint() returns the sprint row; its stages live in their own table.
+      const stepsWithRuns = listSprintSteps(s.id).map(x => {
+        const stepTask = x.task_id ? getTask(x.task_id) : null;
+        const step = {
+          id: x.id,
+          stage: x.stage,
+          status: x.status,
+          output: x.output || (stepTask ? stepTask.result : null),
+          error: x.error,
+        };
         // Include live Kilo run text for steps that are still running.
         if (x.status === 'running' && x.task_id) {
           try {
@@ -2033,7 +2116,12 @@ app.get('/api/sprints/:id/feed', fleetRateLimit, requireFleetRead, (req, res) =>
   try {
     const sprint = getSprint(req.params.id);
     if (!sprint) return res.status(404).json({ error: 'sprint not found' });
-    res.json({ feed: listSprintFeed({ sprintId: sprint.id, kind: req.query.kind, limit: req.query.limit }) });
+    res.json({ feed: listSprintFeed({
+      sprintId: sprint.id,
+      kind: req.query.kind,
+      limit: req.query.limit || 500,
+      after: req.query.after,
+    }) });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
