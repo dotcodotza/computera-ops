@@ -1802,7 +1802,12 @@ for (const action of ['start', 'resume', 'pause', 'stop']) {
   });
 }
 
-app.get('/api/sprints/:id/stream', fleetRateLimit, requireFleetRead, (req, res) => {
+app.get('/api/sprints/:id/stream', fleetRateLimit, (req, res) => {
+  const supplied = String(req.query.t || '');
+  if (supplied && sameSecret(supplied, activeLinkToken)) req.fleetLinkOk = true;
+  if (!FLEET_TOKEN || !hasFleetToken(req) && !isLoopbackHost(req) && !req.fleetLinkOk) {
+    return res.status(401).json({ error: 'Fleet token required' });
+  }
   const sprint = getSprint(req.params.id);
   if (!sprint) return res.status(404).json({ error: 'sprint not found' });
   res.setHeader('Content-Type', 'text/event-stream');
@@ -1918,6 +1923,7 @@ app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 // Fleet boot
 // -------------------------------------------------------------
 fleet.registerSelf();
+try { fleet.today(); } catch (e) { /* init link token */ }
 probeCapabilities({ ollamaUrl: OLLAMA_URL, kiloUrl: KILO_URL })
   .then((caps) => {
     fleet.setCapabilities(caps);

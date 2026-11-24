@@ -1441,16 +1441,30 @@
   }
 
   function renderFeeds(feed) {
-    const pace = (feed || []).filter(f => f.kind === 'pace');
     const activity = (feed || []).filter(f => f.kind !== 'pace');
     const paceBox = document.getElementById('auto-pace');
     const actBox = document.getElementById('auto-activity');
     if (!paceBox || !actBox) return;
-    paceBox.innerHTML = pace.length
-      ? pace.slice(0, 40).map(f =>
-          '<div class="feed-row pace"><span class="feed-kind">pace</span><span class="feed-msg">' + escapeHtml(f.message) + '</span>' +
-          '<span class="feed-time">' + escapeHtml(timeOf(f.created_at)) + '</span></div>').join('')
-      : '<div class="empty"><span class="big">💬</span>No pace-maker chatter yet.</div>';
+    // Replace banter feed with live SSE stream of the selected sprint's steps.
+    if (state.auto && state.auto.selected) {
+      if (window._paceEs) { try { window._paceEs.close(); } catch (e) {} }
+      const es = new EventSource('/api/sprints/' + state.auto.selected + '/stream?t=' + encodeURIComponent((state.fleet.today || {}).link_token || ''));
+      window._paceEs = es;
+      paceBox.innerHTML = '<div class="empty"><span class="big">📡</span>Live stream connecting…</div>';
+      es.onmessage = function (ev) {
+        try {
+          const d = JSON.parse(ev.data);
+          const lines = (d.steps || []).map(s =>
+            '<div class="feed-row"><span class="feed-kind">' + escapeHtml(s.stage) + '</span>' +
+            '<span class="feed-msg">' + escapeHtml((s.output || s.status || '').slice(0, 200)) + '</span></div>'
+          ).join('');
+          paceBox.innerHTML = lines || '<div class="empty"><span class="big">📡</span>Waiting for output…</div>';
+        } catch (e) {}
+      };
+      es.addEventListener('close', function () { es.close(); window._paceEs = null; });
+    } else {
+      paceBox.innerHTML = '<div class="empty"><span class="big">📡</span>No active sprint stream.</div>';
+    }
     actBox.innerHTML = activity.length
       ? activity.slice(0, 40).map(f =>
           '<div class="feed-row"><span class="feed-kind">' + escapeHtml(f.kind) + '</span><span class="feed-msg">' + escapeHtml(f.message) + '</span>' +
