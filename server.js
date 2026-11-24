@@ -23,7 +23,7 @@ import { createFleet, probeCapabilities, startWorkerHeartbeat, todayKey } from '
 import { createKiloRuns } from './kilo-runs.js';
 import { createSprints, buildStepPrompt, assignFleetRoles, STAGE_TEMPLATES, ROLES } from './sprint.js';
 import {
-  createRunnerRegistry, createDshRunner, createFleetRunner, createPreviewGuard,
+  createRunnerRegistry, createDshRunner, createOllamaRunner, createFleetRunner, createPreviewGuard,
 } from './runners.js';
 import {
   createSprint, getSprint, listSprints, updateSprint, addSprintStep, listSprintSteps,
@@ -585,13 +585,15 @@ app.get('/api/ping', (req, res) => res.json({ ok: true, role: ROLE, at: new Date
 app.get('/api/health', async (req, res) => {
   let ollamaStatus = 'offline';
   try {
-    const check = await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(2000) });
+    // /api/version answers while the model is generating; /api/tags can queue
+    // behind a long run and make a busy node look offline.
+    const check = await fetch(`${OLLAMA_URL}/api/version`, { signal: AbortSignal.timeout(4000) });
     if (check.ok) ollamaStatus = 'online';
   } catch { ollamaStatus = 'unreachable'; }
 
   let kiloStatus = 'offline';
   try {
-    const check = await fetch(`${KILO_URL}/global/health`, { signal: AbortSignal.timeout(2000) });
+    const check = await fetch(`${KILO_URL}/global/health`, { signal: AbortSignal.timeout(4000) });
     if (check.ok) kiloStatus = 'online';
   } catch { kiloStatus = 'unreachable'; }
 
@@ -1859,6 +1861,11 @@ const sprintRunners = createRunnerRegistry();
 sprintRunners.register(createDshRunner({
   workdir: process.env.DSH_WORKDIR || __dirname,
   previewGuard,
+}));
+sprintRunners.register(createOllamaRunner({
+  url: OLLAMA_URL,
+  model: process.env.SPRINT_OLLAMA_MODEL || process.env.FLEET_OLLAMA_MODEL || '',
+  timeoutMs: Number(process.env.SPRINT_OLLAMA_TIMEOUT_MS || 20 * 60 * 1000),
 }));
 sprintRunners.register(createFleetRunner({ dispatch: (taskId) => fleet.dispatch(taskId) }));
 

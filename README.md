@@ -274,3 +274,23 @@ allocate its 8 GB KV cache); `qwen2.5-coder:1.5b` runs but often writes tool cal
 as JSON text instead of native tool calls, so sprint output quality is limited by
 the model, not the runner. Kilo's local server exposes no OpenAI-compatible model
 endpoint, so it is not a harness route without a gateway key.
+
+### Runner modes on a CPU-only node
+
+`SPRINT_RUNNER` selects which adapter executes sprint steps:
+
+| Value | Adapter | Use when |
+|---|---|---|
+| `auto` | dsh, then fleet | a capable model (DeepSeek key or fast local GPU) is available |
+| `dsh` | DeepSeek Harness headless | you want tools, file edits and a full transcript |
+| `ollama` | plain `POST /api/chat` to Ollama | small local models: no tool schemas, so they answer in prose |
+| `fleet` | capability-aware dispatch | workers own the engines |
+
+On this machine `SPRINT_RUNNER=ollama` with `SPRINT_OLLAMA_MODEL=qwen2.5-coder:1.5b`:
+dsh works but its ~5.7k-token tool prompt takes over 20 minutes to prefill on CPU,
+so a 20-minute sprint cannot finish a stage. The dsh route is still configured and
+becomes the right choice as soon as a faster model is behind it.
+
+`qwen3.5:4b` (tag `computera-sprint`, `num_ctx 8192`) emits real tool calls and
+would suit dsh, but needs ~114s for a one-word answer here, so it is only usable
+with a longer budget.

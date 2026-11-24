@@ -102,6 +102,7 @@ export function planSprintSteps({ tasks = [], stages, models = [], overrides = {
         position: position++,
         source_task_id: source.id || null,
         source_title: String(source.title || '').slice(0, 200),
+        source_description: String(source.description || '').slice(0, 4000),
         stage,
         role: STAGE_ROLE[stage],
         requires_approval: index === effective.length - 1,
@@ -119,6 +120,7 @@ export function buildStepPrompt(step = {}, sprint = {}, context = {}) {
     `Sustained sprint: ${sprint.goal || 'improve the assigned work'}`,
     `Stage: ${step.stage} · role: ${step.role}`,
     title ? `Task: ${title}` : '',
+    step.source_description ? `Task brief:\n${step.source_description}` : '',
     previous.length
       ? 'Work so far:\n' + previous
         .map(s => `### ${s.stage} (${s.role})\n${String(s.output).slice(0, 6000)}`)
@@ -384,6 +386,9 @@ export function createSprints(options = {}) {
       const running = store.listSprints(100).filter(s => s.status === 'running');
       for (const sprint of running) {
         if (sprint.ends_at && Date.parse(sprint.ends_at) <= now()) {
+          // Stop the step that is already running: a harness or engine call can
+          // outlive the sprint budget, and the budget is the operator's contract.
+          aborts.get(sprint.id)?.abort();
           store.updateSprint(sprint.id, { status: 'review', finished_at: iso() });
           feed(sprint.id, 'system', 'Sprint time budget reached; stopping at the last checkpoint');
           continue;

@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import {
   normalizeDshEvent,
   createDshRunner,
+  createOllamaRunner,
   createFleetRunner,
   createRunnerRegistry,
   createPreviewGuard,
@@ -119,6 +120,27 @@ test('the fleet runner fails cleanly when a step has no task', async () => {
   const outcome = await createFleetRunner({ dispatch: async () => ({ ok: true, text: 'x' }) }).run({ step: {} });
   assert.equal(outcome.ok, false);
   assert.match(outcome.error, /task_id/);
+});
+
+test('the ollama runner streams prose into the feed', async () => {
+  const body = new ReadableStream({
+    start(controller) {
+      const encode = value => new TextEncoder().encode(value);
+      controller.enqueue(encode('{"message":{"content":"hello "}}\n'));
+      controller.enqueue(encode('{"message":{"content":"world"},"done":true}\n'));
+      controller.close();
+    },
+  });
+  const runner = createOllamaRunner({
+    model: 'local:1b',
+    fetchImpl: async () => new Response(body, { status: 200 }),
+  });
+  const events = [];
+  const outcome = await runner.run({ prompt: 'write it', onEvent: event => events.push(event) });
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.text, 'hello world');
+  assert.ok(events.some(event => event.kind === 'runner'));
+  assert.ok(events.some(event => event.kind === 'agent' && /hello/.test(event.detail)));
 });
 
 test('the preview guard tracks consecutive failures', async () => {

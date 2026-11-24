@@ -493,6 +493,89 @@ export function createDshRunner(options = {}) {
   };
 }
 
+// Plain chat against Ollama's native API: no tool schemas, so a small local model
+// answers with prose instead of imitating tool-call JSON. This is the local
+// fallback for sprints when the harness has no capable model behind it.
+export function createOllamaRunner(options = {}) {
+  const {
+    url = 'http://127.0.0.1:11434',
+    model = '',
+    timeoutMs = 20 * 60 * 1000,
+    requestOptions = {},
+    fetchImpl = (...args) => fetch(...args),
+  } = options;
+
+  return {
+    name: 'ollama',
+    kind: 'engine',
+    available: () => true,
+    describe: () => `ollama · ${model || 'first installed model'}`,
+    async run({ prompt, onEvent, signal } = {}) {
+      let chosen = model;
+      if (!chosen) {
+        try {
+          const tagsRes = await fetchImpl(`${url}/api/tags`);
+          const tags = await tagsRes.json();
+          chosen = (tags.models || [])[0]?.name || '';
+        } catch { /* reported below */ }
+      }
+      if (!chosen) return { ok: false, engine: 'ollama', error: 'no Ollama model installed' };
+
+      onEvent?.({ kind: 'runner', message: `ollama · ${chosen}` });
+      let res;
+      try {
+        res = await fetchImpl(`${url}/api/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: chosen,
+            messages: [{ role: 'user', content: String(prompt || '') }],
+            stream: true,
+            ...(requestOptions && Object.keys(requestOptions).length ? { options: requestOptions } : {}),
+          }),
+          signal: signal || AbortSignal.timeout(timeoutMs),
+        });
+      } catch (err) {
+        return { ok: false, engine: 'ollama', error: `ollama unreachable: ${err.message}` };
+      }
+      if (!res.ok) return { ok: false, engine: 'ollama', error: `Ollama error (${res.status})` };
+
+      let text = '';
+      const decoder = new TextDecoder();
+      let buffer = '';
+      const reader = res.body.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            let chunk;
+            try { chunk = JSON.parse(trimmed); } catch { continue; }
+            const piece = chunk.message?.content || '';
+            if (piece) {
+              text += piece;
+              onEvent?.({ kind: 'agent', message: piece.slice(-180), detail: text.slice(-12000) });
+            }
+            if (chunk.error) return { ok: false, engine: 'ollama', error: String(chunk.error) };
+          }
+        }
+      } catch (err) {
+        return { ok: false, engine: 'ollama', error: err.message };
+      } finally {
+        try { reader.releaseLock(); } catch { /* stream already closed */ }
+      }
+
+      if (!text.trim()) return { ok: false, engine: 'ollama', error: 'ollama returned an empty answer' };
+      return { ok: true, engine: 'ollama', text };
+    },
+  };
+}
+
 export function createFleetRunner({ dispatch, name = 'fleet' } = {}) {
   return {
     name,

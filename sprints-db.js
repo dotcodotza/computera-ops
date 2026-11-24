@@ -31,6 +31,7 @@ db.exec(`
     source_task_id TEXT,
     task_id TEXT,
     source_title TEXT NOT NULL DEFAULT '',
+    source_description TEXT NOT NULL DEFAULT '',
     stage TEXT NOT NULL,
     role TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
@@ -64,6 +65,11 @@ for (const [name, ddl] of [
   ['runner', "ALTER TABLE sprint_feed ADD COLUMN runner TEXT NOT NULL DEFAULT ''"],
 ]) {
   if (!feedColumns.has(name)) db.exec(ddl);
+}
+
+const stepColumns = new Set(db.prepare('PRAGMA table_info(sprint_steps)').all().map(c => c.name));
+if (!stepColumns.has('source_description')) {
+  db.exec("ALTER TABLE sprint_steps ADD COLUMN source_description TEXT NOT NULL DEFAULT ''");
 }
 
 function parseJson(value, fallback) {
@@ -101,6 +107,7 @@ function rowToStep(row) {
     source_task_id: row.source_task_id || null,
     task_id: row.task_id || null,
     source_title: row.source_title || '',
+    source_description: row.source_description || '',
     stage: row.stage,
     role: row.role,
     status: row.status,
@@ -209,6 +216,7 @@ export function addSprintStep(sprintId, step = {}) {
     source_task_id: step.source_task_id ? String(step.source_task_id) : null,
     task_id: step.task_id ? String(step.task_id) : null,
     source_title: String(step.source_title || '').slice(0, 200),
+    source_description: String(step.source_description || '').slice(0, 4000),
     stage: String(step.stage || 'draft'),
     role: String(step.role || 'worker'),
     status: STEP_STATUSES.includes(step.status) ? step.status : 'pending',
@@ -222,10 +230,10 @@ export function addSprintStep(sprintId, step = {}) {
     updated_at: now,
   };
   db.prepare(`
-    INSERT INTO sprint_steps (id, sprint_id, position, source_task_id, task_id, source_title, stage, role,
+    INSERT INTO sprint_steps (id, sprint_id, position, source_task_id, task_id, source_title, source_description, stage, role,
                               status, prompt, output, error, requires_approval, approved_at, applied_at,
                               created_at, updated_at)
-    VALUES (:id, :sprint_id, :position, :source_task_id, :task_id, :source_title, :stage, :role,
+    VALUES (:id, :sprint_id, :position, :source_task_id, :task_id, :source_title, :source_description, :stage, :role,
             :status, :prompt, :output, :error, :requires_approval, :approved_at, :applied_at,
             :created_at, :updated_at)
   `).run(row);
