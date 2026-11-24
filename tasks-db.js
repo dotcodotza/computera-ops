@@ -53,10 +53,6 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_tasks_due_date ON tasks(due_date);
   CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
-
-  // Add kilo_run_id column to existing databases (no-op if already present).
-  try { db.exec('ALTER TABLE tasks ADD COLUMN kilo_run_id TEXT'); } catch { /* column exists */ }
-
   CREATE TABLE IF NOT EXISTS workers (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -105,6 +101,7 @@ for (const [name, ddl] of [
   ['result', 'ALTER TABLE tasks ADD COLUMN result TEXT'],
   ['parent_id', 'ALTER TABLE tasks ADD COLUMN parent_id TEXT'],
   ['sprint_id', 'ALTER TABLE tasks ADD COLUMN sprint_id TEXT'],
+  ['kilo_run_id', 'ALTER TABLE tasks ADD COLUMN kilo_run_id TEXT'],
 ]) {
   if (!existingColumns.has(name)) db.exec(ddl);
 }
