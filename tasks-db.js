@@ -21,7 +21,7 @@ fs.ensureDirSync(DATA_DIR);
 
 export const SQLITE_PRAGMAS = [
   'PRAGMA journal_mode = WAL;',
-  'PRAGMA busy_timeout = 5000;',
+  'PRAGMA busy_timeout = 30000;',
 ];
 
 // One place that knows how this app opens SQLite: WAL plus a busy timeout, so a

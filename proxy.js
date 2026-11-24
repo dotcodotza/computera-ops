@@ -75,6 +75,7 @@ export async function proxyRequest(req, res, options = {}) {
     delete outHeaders['content-encoding'];
     delete outHeaders['content-length'];
     res.status(upstream.status);
+    res.setHeader('X-Accel-Buffering', 'no');
     for (const [key, value] of Object.entries(outHeaders)) {
       try { res.setHeader(key, value); } catch { /* invalid upstream header */ }
     }

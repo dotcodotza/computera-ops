@@ -59,7 +59,7 @@ test('the configured pragmas let two connections write the same file without "da
     assert.equal(String(journal.journal_mode || journal['journal_mode']).toLowerCase(), 'wal');
 
     const timeout = setup.prepare('PRAGMA busy_timeout').get();
-    assert.equal(Number(Object.values(timeout)[0]), 5000, 'writers wait instead of failing fast');
+    assert.equal(Number(Object.values(timeout)[0]), 30000, 'writers wait instead of failing fast');
 
     const [a, b] = await Promise.all([runWorker('a'), runWorker('b')]);
     assert.deepEqual(a.errors, [], 'first writer never hit a lock');

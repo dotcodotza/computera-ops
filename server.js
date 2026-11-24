@@ -927,6 +927,7 @@ app.get('/api/memory/list', async (req, res) => {
 
 // Chat with Ollama (Streaming, Agent tool-calling, document-aware)
 app.post('/api/chat', async (req, res) => {
+  res.setHeader('X-Accel-Buffering', 'no');
   try {
     let { messages, system, model = 'qwen2.5-coder:1.5b', stream = true, enableTools = false, activeDocumentPath } = req.body;
     if (!messages || !Array.isArray(messages)) return res.status(400).json({ error: 'messages array required' });
