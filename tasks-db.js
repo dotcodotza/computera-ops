@@ -45,6 +45,7 @@ db.exec(`
     due_date TEXT,
     tags TEXT NOT NULL DEFAULT '',
     kilo_session_id TEXT,
+    kilo_run_id TEXT,
     last_message_id TEXT,
     last_run_at TEXT,
     created_at TEXT NOT NULL,
@@ -52,6 +53,9 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_tasks_due_date ON tasks(due_date);
   CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+
+  // Add kilo_run_id column to existing databases (no-op if already present).
+  try { db.exec('ALTER TABLE tasks ADD COLUMN kilo_run_id TEXT'); } catch { /* column exists */ }
 
   CREATE TABLE IF NOT EXISTS workers (
     id TEXT PRIMARY KEY,

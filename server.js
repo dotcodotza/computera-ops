@@ -1225,7 +1225,32 @@ async function runTaskOnLocalEngine(task) {
   let lastError = null;
   for (const engine of engines) {
     try {
-      const text = engine === 'kilo' ? await runKiloTask(prompt, task.agent || 'master') : await runOllamaTask(prompt);
+      let text;
+      if (engine === 'kilo') {
+        const sessionRes = await fetch(`${KILO_URL}/session`, {
+          method: 'POST',
+          headers: kiloHeaders(),
+          body: JSON.stringify({ title: 'Fleet task', agent: task.agent || 'master' }),
+          signal: AbortSignal.timeout(15000),
+        });
+        if (!sessionRes.ok) throw new Error(`Kilo session error (${sessionRes.status})`);
+        const session = await sessionRes.json();
+        if (!session.id) throw new Error('Kilo session id missing');
+        const { run } = await kiloRuns.start({
+          sessionId: session.id,
+          prompt,
+          agent: task.agent || 'master',
+          model: process.env.FLEET_KILO_MODEL || undefined,
+        });
+        // Store runId on the task so the SSE stream can surface live text.
+        try { updateTask(task.id, { kilo_session_id: session.id, kilo_run_id: run.id }); } catch { /* best effort */ }
+        const budget = Number(process.env.KILO_TASK_TIMEOUT_MS || 30 * 60 * 1000);
+        const finished = await kiloRuns.waitFor(run.id, budget);
+        if (!finished.text.trim()) throw new Error('Kilo returned an empty answer');
+        text = finished.text;
+      } else {
+        text = await runOllamaTask(prompt);
+      }
       return { ok: true, engine, text };
     } catch (err) { lastError = err; }
   }
@@ -1383,6 +1408,37 @@ app.get('/api/kilo/run/:runId', (req, res) => {
   const run = kiloRuns.get(req.params.runId);
   if (!run) return res.status(404).json({ error: 'run not found' });
   res.json({ ...kiloRuns.snapshot(run, Number(req.query.offset) || 0), runId: run.id });
+});
+
+// Stream live text deltas from a running Kilo run via SSE.
+app.get('/api/kilo/run/:runId/stream', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+  let sent = 0;
+  const flush = () => {
+    const current = kiloRuns.get(req.params.runId);
+    if (!current) { res.write('event: close\ndata: {}\n\n'); end(); return; }
+    if (current.text.length > sent) {
+      res.write(`data: ${JSON.stringify({ delta: current.text.slice(sent), offset: current.text.length })}\n\n`);
+      sent = current.text.length;
+    }
+    if (current.status !== 'running') {
+      res.write(`data: ${JSON.stringify({ done: true, text: current.text, status: current.status, error: current.error })}\n\n`);
+      end();
+    }
+  };
+  const unsub = kiloRuns.subscribe(flush);
+  const heartbeat = setInterval(() => {
+    const current = kiloRuns.get(req.params.runId);
+    if (!current) return;
+    res.write(`data: ${JSON.stringify({ status: current.status, waiting: !!current.waiting, elapsedMs: Date.now() - (current.startedMs || Date.now()) })}\n\n`);
+  }, 5000);
+  const end = () => { clearInterval(heartbeat); unsub(); try { res.end(); } catch {} };
+  res.on('close', () => end());
+  flush();
 });
 
 // Stop a run but keep whatever text it already produced.
@@ -1820,7 +1876,26 @@ app.get('/api/sprints/:id/stream', fleetRateLimit, (req, res) => {
     try {
       const s = getSprint(req.params.id);
       if (!s) { res.write('event: close\ndata: {}\n\n'); clearInterval(timer); res.end(); return; }
-      const snap = JSON.stringify({ status: s.status, steps: s.steps.map(x => ({ id: x.id, stage: x.stage, status: x.status, output: x.output, error: x.error })) });
+      const stepsWithRuns = s.steps.map(x => {
+        const step = { id: x.id, stage: x.stage, status: x.status, output: x.output, error: x.error };
+        // Include live Kilo run text for steps that are still running.
+        if (x.status === 'running' && x.task_id) {
+          try {
+            const task = getTask(x.task_id);
+            if (task?.kilo_run_id) {
+              const run = kiloRuns.get(task.kilo_run_id);
+              if (run) {
+                step.kilo_run_id = run.id;
+                step.kilo_text = run.text;
+                step.kilo_status = run.status;
+                step.kilo_error = run.error || null;
+              }
+            }
+          } catch { /* best effort */ }
+        }
+        return step;
+      });
+      const snap = JSON.stringify({ status: s.status, steps: stepsWithRuns });
       if (snap !== last) { last = snap; res.write(`data: ${snap}\n\n`); }
       if (s.status === 'done' || s.status === 'stopped' || s.status === 'cancelled') { res.write('event: close\ndata: {}\n\n'); clearInterval(timer); res.end(); }
     } catch (err) { res.write(`event: error\ndata: ${JSON.stringify({ error: err.message })}\n\n`); }
