@@ -351,6 +351,30 @@
 .attention.bad { border-color: rgba(251, 113, 133, 0.4); background: rgba(251, 113, 133, 0.08); color: #fecdd3; }
 .attention .btn { margin-left: auto; }
 
+    /* task outcome popup */
+    .modal.wide { width: 720px; }
+    .outcome-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); gap: 8px; }
+    .outcome-stat { background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; }
+    .outcome-stat .n { font-size: 18px; font-weight: 800; letter-spacing: -0.02em; display: flex; align-items: center; }
+    .outcome-stat .l { font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--dim); margin-top: 3px; }
+    .outcome-block { display: flex; flex-direction: column; gap: 7px; }
+    .outcome-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--dim); }
+    .outcome-result {
+      margin: 0; font-family: 'JetBrains Mono', monospace; font-size: 11px; line-height: 1.55; color: var(--muted);
+      background: var(--bg); border: 1px solid var(--line); border-radius: 9px; padding: 10px;
+      white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto;
+    }
+    .outcome-step {
+      background: var(--surface-2); border: 1px solid var(--line); border-left: 3px solid var(--dim);
+      border-radius: 10px; padding: 9px 11px;
+    }
+    .outcome-step.done { border-left-color: var(--ok); }
+    .outcome-step.failed { border-left-color: var(--bad); }
+    .outcome-step.running { border-left-color: var(--accent); }
+    .outcome-step + .outcome-step { margin-top: 7px; }
+    .outcome-step .feed-time { font-size: 10px; }
+    .outcome-error { margin-top: 6px; font-size: 11.5px; color: #fecdd3; }
+
     /* overlay / palette / toast */
     .overlay { position: fixed; inset: 0; background: rgba(4, 6, 10, 0.62); backdrop-filter: blur(3px); z-index: 40; display: flex; animation: fade .16s ease both; }
     @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
@@ -893,6 +917,7 @@
         '</select></td>' +
         '<td><span class="pill ' + t.priority + '">' + escapeHtml(t.priority) + '</span></td>' +
         '<td><div class="row-actions">' +
+          '<button class="btn sm ghost" onclick="openOutcome(\'' + t.id + '\')">Outcome</button>' +
           '<button class="btn sm" onclick="dispatchTask(\'' + t.id + '\')">Dispatch</button>' +
           '<button class="btn sm primary" onclick="runTask(\'' + t.id + '\')">' + (t.kilo_session_id ? 'Open run' : 'Run') + '</button>' +
         '</div></td>' +
@@ -1000,6 +1025,7 @@
         '<div class="sheet-body">' + taskForm(task) + '</div>' +
         '<div class="sheet-foot">' +
           '<button class="btn danger" onclick="removeTask()">Delete</button>' +
+          '<button class="btn ghost" onclick="openOutcome(\'' + task.id + '\')">Outcome</button>' +
           '<button class="btn ghost" onclick="runTask(\'' + task.id + '\')">Run in Kilo</button>' +
           '<button class="btn primary" onclick="saveTask()">Save</button>' +
         '</div>' +
@@ -1007,6 +1033,99 @@
   }
 
   function closeOverlay() { document.getElementById('overlay-root').innerHTML = ''; }
+
+  /* ---------------- task outcome popup ---------------- */
+  async function openOutcome(id) {
+    document.getElementById('overlay-root').innerHTML =
+      '<div class="overlay center" onclick="if(event.target===this)closeOverlay()">' +
+        '<div class="modal wide" onclick="event.stopPropagation()">' +
+          '<div class="sheet-head"><div><strong>Task outcome</strong><div class="dim" id="outcome-sub">Loading…</div></div>' +
+            '<button class="btn sm ghost" onclick="closeOverlay()">Close</button></div>' +
+          '<div class="sheet-body" id="outcome-body">' +
+            '<div class="skel" style="width:40%"></div><div class="skel" style="width:90%"></div><div class="skel" style="width:70%"></div>' +
+          '</div>' +
+          '<div class="sheet-foot"><button class="btn ghost" onclick="closeOverlay()">Close</button>' +
+            '<button class="btn" id="outcome-open-task">Edit task</button>' +
+            '<button class="btn primary" id="outcome-run">Run in Kilo</button></div>' +
+        '</div></div>';
+    try {
+      const data = await api('/api/tasks/' + encodeURIComponent(id) + '/outcome');
+      renderOutcome(data);
+    } catch (err) {
+      const body = document.getElementById('outcome-body');
+      if (body) body.innerHTML = emptyState('⚠️', 'Could not load outcome', err.message);
+    }
+  }
+
+  function outcomeStepHtml(step) {
+    const output = String(step.output || '').trim();
+    const error = String(step.error || '').trim();
+    const needsReview = step.status === 'done' && step.requires_approval && !step.applied_at;
+    return '<div class="outcome-step ' + attr(step.status) + '">' +
+      '<div class="step-line"><span class="step-stage">' + escapeHtml(step.stage) + '</span>' +
+        '<span class="role-tag ' + attr(step.role) + '">' + escapeHtml(step.role) + '</span>' +
+        '<span class="pill ' + attr(step.status) + '">' + escapeHtml(step.status) + '</span>' +
+        (needsReview ? '<span class="pill review">needs review</span>' : '') +
+        (step.applied_at ? '<span class="pill done">applied</span>' : '') +
+        '<span class="feed-time">' + escapeHtml(timeOf(step.updated_at)) + '</span></div>' +
+      '<div class="step-meta">' + escapeHtml(step.sprint_goal || 'sprint stage') +
+        (step.sprint_status ? ' · ' + escapeHtml(step.sprint_status) + ' sprint' : '') +
+        (step.approved_at ? ' · approved' : '') + '</div>' +
+      (error ? '<div class="outcome-error">' + escapeHtml(error) + '</div>' : '') +
+      (output ? '<details class="step-output"><summary>' +
+        (output.length > 120 ? 'Output · ' + output.length + ' chars' : 'Output') +
+        '</summary><pre>' + escapeHtml(output.slice(0, 20000)) + '</pre></details>' : '') +
+    '</div>';
+  }
+
+  function renderOutcome(data) {
+    const task = data.task || {};
+    const steps = data.steps || [];
+    const body = document.getElementById('outcome-body');
+    if (!body) return;
+    document.getElementById('outcome-sub').textContent = task.title || '';
+    const openBtn = document.getElementById('outcome-open-task');
+    if (openBtn) openBtn.onclick = () => { closeOverlay(); openTask(task.id); };
+    const runBtn = document.getElementById('outcome-run');
+    if (runBtn) runBtn.onclick = () => runTask(task.id);
+
+    const done = steps.filter(s => s.status === 'done').length;
+    const failed = steps.filter(s => s.status === 'failed').length;
+    const applied = steps.filter(s => s.applied_at).length;
+    const result = String(task.result || '').trim();
+    const lastRun = task.last_run_at
+      ? new Date(task.last_run_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+      : 'never';
+    const owner = [task.assignee || 'unassigned', AGENT_LABEL[task.agent] || task.agent || ''].filter(Boolean).join(' · ');
+
+    const stat = (value, label) =>
+      '<div class="outcome-stat"><div class="n">' + value + '</div><div class="l">' + label + '</div></div>';
+    let html = '';
+    if (task.blocked_reason) {
+      html += '<div class="attention bad"><span>⚠</span><span>' + escapeHtml(task.blocked_reason) + '</span></div>';
+    }
+    html += '<div class="outcome-stats">' +
+      stat('<span class="pill ' + attr(task.status) + '">' + escapeHtml(STATUS_LABEL[task.status] || task.status) + '</span>', 'Status') +
+      stat(steps.length, 'Stages') +
+      stat(done, 'Done') +
+      stat(failed, 'Failed') +
+      stat(applied, 'Applied') +
+    '</div>' +
+    '<div class="meta-box">' +
+      '<div class="kv"><span>Owner</span><span>' + escapeHtml(owner) + '</span></div>' +
+      '<div class="kv"><span>Priority · due</span><span>' + escapeHtml(task.priority || '—') + ' · ' + escapeHtml(task.due_date ? shortDate(task.due_date) : '—') + '</span></div>' +
+      '<div class="kv"><span>Last run</span><span>' + escapeHtml(lastRun) + '</span></div>' +
+      '<div class="kv"><span>Sprint</span><code style="font-size:10.5px">' + escapeHtml(task.sprint_id || '—') + '</code></div>' +
+    '</div>';
+    if (result) {
+      html += '<div class="outcome-block"><div class="outcome-label">Latest result</div>' +
+        '<pre class="outcome-result">' + escapeHtml(result.slice(0, 20000)) + '</pre></div>';
+    }
+    html += '<div class="outcome-block"><div class="outcome-label">Sprint stages · ' + steps.length + '</div>' +
+      (steps.length ? steps.map(outcomeStepHtml).join('') : '<div class="dim">No sprint has run against this task yet.</div>') +
+    '</div>';
+    body.innerHTML = html;
+  }
 
   async function saveTask() {
     const payload = readForm();
@@ -1417,6 +1536,9 @@
       const rows = group.steps.map(step => {
         const actions = [];
         const needsApproval = step.status === 'done' && step.requires_approval && !step.applied_at;
+        if (step.task_id) {
+          actions.push('<button class="btn sm ghost" onclick="openOutcome(\'' + step.task_id + '\')">Outcome</button>');
+        }
         if (needsApproval) {
           actions.push('<button class="btn sm primary" onclick="approveStep(\'' + step.id + '\', true)">Approve</button>');
           actions.push('<button class="btn sm danger" onclick="approveStep(\'' + step.id + '\', false)">Reject</button>');

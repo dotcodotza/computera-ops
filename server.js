@@ -28,7 +28,7 @@ import {
 import {
   createSprint, getSprint, listSprints, updateSprint, addSprintStep, listSprintSteps,
   getSprintStep, updateSprintStep, nextPendingStep, addSprintFeed, listSprintFeed,
-  resetInterruptedSprints,
+  resetInterruptedSprints, listSprintStepsForTask,
 } from './sprints-db.js';
 import { proxyRequest } from './proxy.js';
 import { createWebSearch, WEB_SEARCH_TOOL } from './web-search.js';
@@ -1669,6 +1669,25 @@ app.patch('/api/tasks/:id', (req, res) => {
 
 app.delete('/api/tasks/:id', (req, res) => {
   try { deleteTask(req.params.id); res.json({ success: true }); } catch (err) { handleTaskError(res, err); }
+});
+
+// Everything that happened to a task: its own result plus every sprint stage it
+// was planned into or ran as, with the owning sprint's goal for context.
+app.get('/api/tasks/:id/outcome', (req, res) => {
+  try {
+    const task = getTask(req.params.id);
+    if (!task) return res.status(404).json({ error: 'task not found' });
+    const steps = listSprintStepsForTask(task.id).map(step => {
+      const sprint = getSprint(step.sprint_id);
+      return {
+        ...step,
+        sprint_goal: sprint ? sprint.goal : '',
+        sprint_status: sprint ? sprint.status : '',
+        sprint_created_at: sprint ? sprint.created_at : null,
+      };
+    });
+    res.json({ task, steps });
+  } catch (err) { handleTaskError(res, err); }
 });
 
 // Tool execution endpoint

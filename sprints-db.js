@@ -281,6 +281,16 @@ export function updateSprintStep(id, patch = {}) {
   return getSprintStep(current.id);
 }
 
+// Every stage a task has been through, whether it was the source task a sprint was
+// planned around or the child task a single stage ran in. Newest first.
+export function listSprintStepsForTask(taskId) {
+  const id = String(taskId);
+  return db.prepare(`
+    SELECT * FROM sprint_steps WHERE source_task_id = ? OR task_id = ?
+    ORDER BY created_at DESC
+  `).all(id, id).map(rowToStep);
+}
+
 export function nextPendingStep(sprintId) {
   return rowToStep(db.prepare(`
     SELECT * FROM sprint_steps WHERE sprint_id = ? AND status = 'pending'
