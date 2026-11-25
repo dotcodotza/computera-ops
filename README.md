@@ -322,3 +322,29 @@ the harness talks to the gateway rather than to that server.
 Verified on this node: a single dsh turn answers in ~43s, an agentic turn with
 `glob`/`pwsh` tools finishes in ~200s, and a 20-minute sprint stage wrote
 `docs/kilo-harness-check.md` end to end with `SPRINT_RUNNER=dsh`.
+
+### Other providers
+
+The profile patch declares one route per provider, each keyed from env, and the
+default route is chosen by env rather than by editing YAML:
+
+```
+DSH_MODEL_PROVIDER=deepseek
+DSH_MODEL=deepseek-chat
+DEEPSEEK_API_KEY=...
+```
+
+| Provider | `DSH_MODEL_PROVIDER` | Key env | Models |
+|---|---|---|---|
+| Kilo Gateway | `kilocode` | `KILO_API_KEY` (placeholder `anonymous`) | `kilo-auto/free` |
+| Ollama (local) | `ollama` | `OLLAMA_API_KEY` (any value) | `computera-sprint` |
+| DeepSeek | `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-chat`, `deepseek-reasoner` |
+| OpenAI | `openai` | `OPENAI_API_KEY` | `gpt-4.1`, `gpt-4.1-mini` |
+| Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-4-5` |
+| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | `openrouter/auto` |
+| Google | `google` | `GEMINI_API_KEY` | `gemini-2.5-flash` |
+
+`.env` is read once at boot, and the sprint runner passes the whole environment to
+dsh, so filling a key and restarting the node is all it takes. An unset or wrong
+key fails the step with the provider's own error (a DeepSeek 401, for example)
+rather than a harness crash.
