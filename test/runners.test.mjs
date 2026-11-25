@@ -143,6 +143,12 @@ test('the ollama runner streams prose into the feed', async () => {
   assert.ok(events.some(event => event.kind === 'agent' && /hello/.test(event.detail)));
 });
 
+test('a dsh tool call carries the tool name, not the literal "tool"', () => {
+  const event = normalizeDshEvent({ type: 'tool_call', callId: 'c1', tool: 'glob', input: { pattern: '*' } });
+  assert.equal(event.kind, 'tool');
+  assert.ok(event.message.startsWith('glob '), event.message);
+});
+
 test('the preview guard tracks consecutive failures', async () => {
   let healthy = false;
   const guard = createPreviewGuard({

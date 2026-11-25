@@ -294,3 +294,31 @@ becomes the right choice as soon as a faster model is behind it.
 `qwen3.5:4b` (tag `computera-sprint`, `num_ctx 8192`) emits real tool calls and
 would suit dsh, but needs ~114s for a one-word answer here, so it is only usable
 with a longer budget.
+
+### Harness model route: Kilo Gateway
+
+`data/dsh-home/profiles/headless/cordis.patch.yml` declares two OpenAI-compatible
+routes for the dsh profile; the default agent model is the Kilo Gateway one:
+
+```yaml
+- id: llm-pi-ai
+  config:
+    providers:
+      kilocode:
+        api: openai-completions
+        baseURL: https://ai-gateway.kilo.ai/api/v1
+        apiKeyEnv: KILO_API_KEY
+        models: [{ id: kilo-auto/free, contextWindow: 131072, maxTokens: 8192 }]
+- id: agent-default-model
+  config: { provider: kilocode, model: kilo-auto/free }
+```
+
+`kilo-auto/free` needs no account key: the gateway accepts the literal bearer
+`anonymous`, so `KILO_API_KEY=anonymous` in `.env` is a placeholder, not a secret.
+The route emits native tool calls, which is what a dsh stage needs. The local
+server on `KILO_URL` (7777) is a session API, not an OpenAI-compatible endpoint, so
+the harness talks to the gateway rather than to that server.
+
+Verified on this node: a single dsh turn answers in ~43s, an agentic turn with
+`glob`/`pwsh` tools finishes in ~200s, and a 20-minute sprint stage wrote
+`docs/kilo-harness-check.md` end to end with `SPRINT_RUNNER=dsh`.

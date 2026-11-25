@@ -85,8 +85,11 @@ export function normalizeDshEvent(record = {}) {
     }
     case 'tool_call':
     case 'tool_use': {
+      // dsh emits `tool` as the tool name for calls, but as an object elsewhere.
       const tool = record.tool || record.function || {};
-      const name = String(record.name || record.toolName || tool.name || 'tool');
+      const name = String(
+        record.name || record.toolName || (typeof record.tool === 'string' ? record.tool : '') || tool.name || 'tool',
+      );
       const args = record.arguments ?? record.input ?? tool.arguments ?? tool.input ?? {};
       return {
         kind: 'tool',
@@ -96,7 +99,9 @@ export function normalizeDshEvent(record = {}) {
     }
     case 'tool_result': {
       const tool = record.tool || {};
-      const name = String(record.name || record.toolName || tool.name || 'tool');
+      const name = String(
+        record.name || record.toolName || (typeof record.tool === 'string' ? record.tool : '') || tool.name || 'tool',
+      );
       const status = String(record.status || '');
       const output = record.output ?? record.result ?? record.content ?? record.text ?? '';
       const error = record.error;
