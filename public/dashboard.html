@@ -1623,19 +1623,22 @@
         actions.push('<button class="btn sm" onclick="retryStep(\'' + step.id + '\')">Retry</button>');
       }
       if (taskId) {
-        actions.push('<button class="btn sm ghost" onclick="openTask(\'' + taskId + '\')">Task</button>');
+        // Same view a finished task has: its own result plus every run recorded
+        // against it, including the output this queue step just produced.
+        actions.push('<button class="btn sm ghost" onclick="openOutcome(\'' + taskId + '\')">Outcome</button>');
       }
-      const output = String(step.output || step.error || '');
+      const out = String(step.output || '').trim();
+      const output = out || String(step.error || '');
       const meta = step.error
         ? escapeHtml(step.error)
-        : (step.status === 'running' ? 'running now' : (step.status === 'pending' ? 'waiting its turn' : 'finished'));
+        : (step.status === 'running' ? 'running now' : (step.status === 'pending' ? 'waiting its turn' : (out ? 'finished · ' + out.length + ' chars of output' : 'finished')));
       return '<div class="step ' + step.status + '">' +
         '<div class="queue-order">' + (step.position + 1) + '</div>' +
         '<div class="step-body">' +
           '<div class="step-line"><span class="step-stage">' + escapeHtml(step.source_title || sprint.goal) + '</span>' +
             '<span class="pill ' + step.status + '">' + escapeHtml(step.status) + '</span></div>' +
           '<div class="step-meta">' + meta + '</div>' +
-          (output ? '<details class="step-output"><summary>Output — ' + output.length + ' chars</summary><pre>' + escapeHtml(output.slice(0, 6000)) + '</pre></details>' : '') +
+          (output ? '<div class="step-preview" onclick="this.classList.toggle(\'open\')">' + escapeHtml(output.slice(0, 320)) + (output.length > 320 ? '…' : '') + '</div>' : '') +
         '</div>' +
         '<div class="step-actions">' + actions.join('') + '</div>' +
       '</div>';
