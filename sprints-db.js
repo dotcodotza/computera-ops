@@ -4,7 +4,7 @@ import { randomUUID } from 'crypto';
 import { db } from './tasks-db.js';
 
 const SPRINT_STATUSES = ['planning', 'running', 'paused', 'review', 'done', 'stopped'];
-const STEP_STATUSES = ['pending', 'running', 'done', 'failed', 'rejected'];
+const STEP_STATUSES = ['pending', 'running', 'done', 'failed', 'rejected', 'skipped'];
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS sprints (
@@ -14,6 +14,8 @@ db.exec(`
     template TEXT NOT NULL DEFAULT 'generic',
     stages TEXT NOT NULL DEFAULT '[]',
     duration_ms INTEGER NOT NULL DEFAULT 0,
+    sequential INTEGER NOT NULL DEFAULT 0,
+    step_timeout_ms INTEGER NOT NULL DEFAULT 0,
     overrides TEXT NOT NULL DEFAULT '{}',
     checkpoint TEXT NOT NULL DEFAULT '{}',
     started_at TEXT,
@@ -67,6 +69,14 @@ for (const [name, ddl] of [
   if (!feedColumns.has(name)) db.exec(ddl);
 }
 
+const sprintColumns = new Set(db.prepare('PRAGMA table_info(sprints)').all().map(c => c.name));
+for (const [name, ddl] of [
+  ['sequential', 'ALTER TABLE sprints ADD COLUMN sequential INTEGER NOT NULL DEFAULT 0'],
+  ['step_timeout_ms', 'ALTER TABLE sprints ADD COLUMN step_timeout_ms INTEGER NOT NULL DEFAULT 0'],
+]) {
+  if (!sprintColumns.has(name)) db.exec(ddl);
+}
+
 const stepColumns = new Set(db.prepare('PRAGMA table_info(sprint_steps)').all().map(c => c.name));
 if (!stepColumns.has('source_description')) {
   db.exec("ALTER TABLE sprint_steps ADD COLUMN source_description TEXT NOT NULL DEFAULT ''");
@@ -88,6 +98,8 @@ function rowToSprint(row) {
     template: row.template,
     stages: parseJson(row.stages, []),
     duration_ms: Number(row.duration_ms || 0),
+    sequential: !!row.sequential,
+    step_timeout_ms: Number(row.step_timeout_ms || 0),
     overrides: parseJson(row.overrides, {}),
     checkpoint: parseJson(row.checkpoint, {}),
     started_at: row.started_at || null,
@@ -144,6 +156,8 @@ export function createSprint(input = {}) {
     template: String(input.template || 'generic'),
     stages: JSON.stringify(Array.isArray(input.stages) ? input.stages : []),
     duration_ms: Number(input.duration_ms || 0),
+    sequential: input.sequential ? 1 : 0,
+    step_timeout_ms: Number(input.step_timeout_ms || 0),
     overrides: JSON.stringify(input.overrides && typeof input.overrides === 'object' ? input.overrides : {}),
     checkpoint: JSON.stringify(input.checkpoint && typeof input.checkpoint === 'object' ? input.checkpoint : {}),
     started_at: input.started_at || null,
@@ -153,10 +167,10 @@ export function createSprint(input = {}) {
     updated_at: now,
   };
   db.prepare(`
-    INSERT INTO sprints (id, goal, status, template, stages, duration_ms, overrides, checkpoint,
-                         started_at, ends_at, finished_at, created_at, updated_at)
-    VALUES (:id, :goal, :status, :template, :stages, :duration_ms, :overrides, :checkpoint,
-            :started_at, :ends_at, :finished_at, :created_at, :updated_at)
+    INSERT INTO sprints (id, goal, status, template, stages, duration_ms, sequential, step_timeout_ms,
+                         overrides, checkpoint, started_at, ends_at, finished_at, created_at, updated_at)
+    VALUES (:id, :goal, :status, :template, :stages, :duration_ms, :sequential, :step_timeout_ms,
+            :overrides, :checkpoint, :started_at, :ends_at, :finished_at, :created_at, :updated_at)
   `).run(sprint);
   return getSprint(sprint.id);
 }
@@ -179,6 +193,8 @@ export function updateSprint(id, patch = {}) {
   if ('template' in patch) next.template = String(patch.template || current.template);
   if ('stages' in patch) next.stages = Array.isArray(patch.stages) ? patch.stages : current.stages;
   if ('duration_ms' in patch) next.duration_ms = Number(patch.duration_ms) || current.duration_ms;
+  if ('sequential' in patch) next.sequential = !!patch.sequential;
+  if ('step_timeout_ms' in patch) next.step_timeout_ms = Number(patch.step_timeout_ms) || 0;
   if ('overrides' in patch) next.overrides = patch.overrides || {};
   if ('checkpoint' in patch) next.checkpoint = patch.checkpoint || {};
   if ('started_at' in patch) next.started_at = patch.started_at || null;
@@ -187,7 +203,8 @@ export function updateSprint(id, patch = {}) {
 
   db.prepare(`
     UPDATE sprints SET goal = :goal, status = :status, template = :template, stages = :stages,
-      duration_ms = :duration_ms, overrides = :overrides, checkpoint = :checkpoint,
+      duration_ms = :duration_ms, sequential = :sequential, step_timeout_ms = :step_timeout_ms,
+      overrides = :overrides, checkpoint = :checkpoint,
       started_at = :started_at, ends_at = :ends_at, finished_at = :finished_at, updated_at = :updated_at
     WHERE id = :id
   `).run({
@@ -197,6 +214,8 @@ export function updateSprint(id, patch = {}) {
     template: next.template,
     stages: JSON.stringify(next.stages || []),
     duration_ms: Number(next.duration_ms || 0),
+    sequential: next.sequential ? 1 : 0,
+    step_timeout_ms: Number(next.step_timeout_ms || 0),
     overrides: JSON.stringify(next.overrides || {}),
     checkpoint: JSON.stringify(next.checkpoint || {}),
     started_at: next.started_at || null,

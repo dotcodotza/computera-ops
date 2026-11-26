@@ -327,6 +327,14 @@
       color: var(--muted); background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
       padding: 10px; max-height: 190px; overflow: auto; white-space: pre-wrap;
     }
+    .composer #sp-goal { width: 100%; font-size: 15px; font-weight: 600; }
+    .queue-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 14px 0 6px; }
+    .queue-picker { max-height: 260px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; padding: 4px; }
+    .queue-row { display: flex; align-items: center; gap: 9px; padding: 6px 8px; border-radius: 7px; font-size: 12px; cursor: pointer; }
+    .queue-row:hover { background: rgba(255, 255, 255, 0.03); }
+    .queue-row input { width: 13px; height: 13px; margin: 0; flex-shrink: 0; }
+    .queue-row .due { margin-left: auto; font-size: 10.5px; color: var(--dim); flex-shrink: 0; }
+    .queue-order { width: 20px; flex-shrink: 0; text-align: right; font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: var(--dim); margin-top: 5px; }
     .sprint-picker { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
     .sprint-pill {
       display: flex; align-items: center; gap: 7px; font-size: 11.5px; padding: 6px 11px; border-radius: 9px;
@@ -538,41 +546,32 @@
         <div class="grid-composer">
           <div class="card composer">
             <div class="card-head">
-              <div><h2>Start a sprint</h2><p>Checkpointed, role-routed, pooled across the fleet</p></div>
+              <div><h2>Run a task queue</h2><p>Whole tasks, one at a time, in due-date order</p></div>
               <span class="pill" id="sp-workers">pool</span>
             </div>
-            <textarea id="sp-goal" rows="2" placeholder="What should this sprint make better?"></textarea>
+            <input id="sp-goal" placeholder="Queue name — e.g. Doctors on Wheels audit, weekend run">
             <div class="field-row">
               <div>
-                <label>Template</label>
-                <div class="chips" id="sp-templates"></div>
+                <label>Tag filter</label>
+                <input id="sp-tag" value="doctors-on-wheels" placeholder="tag (blank = every open task)" oninput="renderQueuePicker()">
               </div>
               <div>
-                <label>Duration</label>
-                <div class="chips" id="sp-durations">
-                  <button class="chip" data-hours="1">1h</button>
-                  <button class="chip" data-hours="4">4h</button>
-                  <button class="chip on" data-hours="10">10h</button>
-                  <button class="chip" data-hours="24">24h</button>
-                </div>
+                <label>Order</label>
+                <div class="chip on" style="pointer-events:none;">Due date · one at a time</div>
               </div>
             </div>
-            <div class="field-row">
-              <div>
-                <label>Source</label>
-                <div class="chips" id="sp-sources">
-                  <button class="chip on" data-source="open">Open tasks</button>
-                  <button class="chip" data-source="goal">Topic only</button>
-                </div>
-              </div>
-              <div>
-                <label>Parallel steps</label>
-                <div class="chip on" id="sp-parallel" style="pointer-events:none;">—</div>
+            <div class="queue-head">
+              <label style="margin:0">Tasks to run</label>
+              <div class="chips" style="margin:0">
+                <button class="chip" onclick="selectQueue('all')">All</button>
+                <button class="chip" onclick="selectQueue('open')">Not done</button>
+                <button class="chip" onclick="selectQueue('none')">None</button>
               </div>
             </div>
+            <div id="sp-tasklist" class="queue-picker"></div>
             <div class="composer-foot">
               <span class="muted" id="sp-hint">—</span>
-              <button class="btn primary" id="sp-start" onclick="createSprint()">Start sprint</button>
+              <button class="btn primary" id="sp-start" onclick="createQueue()">Run queue</button>
             </div>
           </div>
 
@@ -589,8 +588,8 @@
         <div class="card sprint">
           <div class="card-head">
             <div>
-              <h2 id="sprint-goal">No sprint yet</h2>
-              <p id="sprint-meta">Start one above — its stages appear here as they run.</p>
+              <h2 id="sprint-goal">No queue yet</h2>
+              <p id="sprint-meta">Pick tasks above — they run one at a time, in due-date order.</p>
             </div>
             <div class="toolbar" id="sprint-controls"></div>
           </div>
@@ -630,7 +629,7 @@
     calendar: ['Calendar', 'Due dates across the workspace'],
     tasks: ['Tasks', 'Everything the team is carrying'],
     fleet: ['Fleet', 'Workers, host rotation and dispatch'],
-    automations: ['Sprints', 'Sustained work that improves your tasks'],
+    automations: ['Sprints', 'Bulk sequential task runs — one at a time'],
   };
 
   const state = {
@@ -644,7 +643,7 @@
     auto: {
       sprints: [], selected: null, detail: null, roles: [], workers: [],
       templates: {}, parallel: 1, sprintFilter: '',
-      composer: { template: 'generic', hours: 10, source: 'open' },
+      queueSel: new Set(), queueTouched: false,
       runner: null, lastFeed: [], openFeed: new Set(),
     },
   };
@@ -1258,7 +1257,7 @@
       state.auto.parallel = meta.parallel || 1;
       state.auto.runner = meta.runner || null;
       state.auto.sprints = list.sprints || [];
-      renderComposer();
+      renderQueuePicker();
       renderPool();
       renderRoles();
 
@@ -1274,36 +1273,57 @@
     }
   }
 
-  function renderComposer() {
-    const templates = Object.keys(state.auto.templates);
-    const box = document.getElementById('sp-templates');
-    if (box && !box.children.length) {
-      box.innerHTML = (templates.length ? templates : ['generic', 'code', 'docs', 'marketing', 'research'])
-        .map(t => '<button class="chip' + (t === state.auto.composer.template ? ' on' : '') + '" data-template="' + attr(t) + '">' + escapeHtml(t) + '</button>')
-        .join('');
-      box.querySelectorAll('[data-template]').forEach(btn => {
-        btn.onclick = () => {
-          state.auto.composer.template = btn.dataset.template;
-          box.querySelectorAll('.chip').forEach(c => c.classList.toggle('on', c === btn));
-        };
-      });
-    }
-    document.querySelectorAll('#sp-durations [data-hours]').forEach(btn => {
-      btn.classList.toggle('on', Number(btn.dataset.hours) === state.auto.composer.hours);
-    });
-    document.querySelectorAll('#sp-sources [data-source]').forEach(btn => {
-      btn.classList.toggle('on', btn.dataset.source === state.auto.composer.source);
-    });
-    const open = state.tasks.filter(t => t.status === 'todo' || t.status === 'in_progress').length;
-    document.getElementById('sp-parallel').textContent = state.auto.parallel + ' at a time';
+  // Tasks a queue can run: open work, filtered by tag, in due-date order.
+  function queueCandidates() {
+    const tagEl = document.getElementById('sp-tag');
+    const tag = (tagEl ? tagEl.value : '').trim().toLowerCase();
+    return state.tasks
+      .filter(t => t.status !== 'done')
+      .filter(t => !tag || (t.tags || []).some(x => String(x).toLowerCase().includes(tag)))
+      .sort((a, b) => String(a.due_date || '9999-99-99').localeCompare(String(b.due_date || '9999-99-99'))
+        || String(a.created_at || '').localeCompare(String(b.created_at || '')));
+  }
+
+  function renderQueuePicker() {
+    const box = document.getElementById('sp-tasklist');
+    if (!box) return;
+    const list = queueCandidates();
+    const known = new Set(list.map(t => t.id));
+    // First paint selects everything; after that the operator's ticks rule.
+    if (!state.auto.queueTouched) state.auto.queueSel = new Set(known);
+    for (const id of [...state.auto.queueSel]) if (!known.has(id)) state.auto.queueSel.delete(id);
+
+    box.innerHTML = list.length
+      ? list.map(t => {
+          const on = state.auto.queueSel.has(t.id);
+          return '<label class="queue-row">' +
+            '<input type="checkbox"' + (on ? ' checked' : '') + ' onchange="toggleQueueTask(\'' + t.id + '\', this.checked)">' +
+            '<span>' + escapeHtml(t.title) + '</span>' +
+            '<span class="due">' + escapeHtml(t.due_date || 'no date') + '</span>' +
+          '</label>';
+        }).join('')
+      : '<div class="dim" style="padding:8px">No open tasks match that tag.</div>';
+
+    const selected = list.filter(t => state.auto.queueSel.has(t.id)).length;
+    const runnerLabel = state.auto.runner ? (state.auto.runner.active || 'none') : 'auto';
+    document.getElementById('sp-hint').textContent = selected + ' of ' + list.length + ' task' + (list.length === 1 ? '' : 's') +
+      ' queued · one at a time · runner: ' + runnerLabel;
     const poolPill = document.getElementById('sp-workers');
     if (poolPill) poolPill.textContent = (state.auto.workers || []).filter(w => w.status === 'online').length + ' online';
-    const offline = (state.auto.workers || []).filter(w => w.status !== 'online').length;
-    const runnerLabel = state.auto.runner ? (state.auto.runner.active || 'none') : 'auto';
-    const runnerNote = ' · runner: ' + runnerLabel;
-    document.getElementById('sp-hint').textContent = (state.auto.composer.source === 'open'
-      ? open + ' open task' + (open === 1 ? '' : 's') + ' · ' + state.auto.parallel + ' steps in parallel · ' + offline + ' worker(s) offline'
-      : 'Topic-only sprint · ' + state.auto.parallel + ' steps in parallel') + runnerNote;
+    const start = document.getElementById('sp-start');
+    if (start && !start.disabled) start.textContent = selected ? 'Run ' + selected + ' task' + (selected === 1 ? '' : 's') : 'Run queue';
+  }
+
+  function toggleQueueTask(id, on) {
+    state.auto.queueTouched = true;
+    if (on) state.auto.queueSel.add(id); else state.auto.queueSel.delete(id);
+    renderQueuePicker();
+  }
+
+  function selectQueue(which) {
+    state.auto.queueTouched = true;
+    state.auto.queueSel = which === 'none' ? new Set() : new Set(queueCandidates().map(t => t.id));
+    renderQueuePicker();
   }
 
   function renderPool() {
@@ -1345,29 +1365,34 @@
     } catch (err) { toast(err.message, true); }
   }
 
-  async function createSprint() {
-    const goal = document.getElementById('sp-goal').value.trim();
-    if (!goal) { toast('A sprint needs a goal', true); return; }
+  async function createQueue() {
+    const list = queueCandidates();
+    const ids = list.filter(t => state.auto.queueSel.has(t.id)).map(t => t.id);
+    if (!ids.length) { toast('Pick at least one task to run', true); return; }
+    const goalEl = document.getElementById('sp-goal');
+    const goal = (goalEl.value || '').trim() || ('Task queue: ' + list[0].title).slice(0, 200);
     const button = document.getElementById('sp-start');
     button.disabled = true;
-    button.textContent = 'Planning…';
+    button.textContent = 'Queuing…';
     try {
       const data = await api('/api/sprints', {
         method: 'POST',
         body: JSON.stringify({
           goal,
-          template: state.auto.composer.template,
-          durationHours: state.auto.composer.hours,
-          goalOnly: state.auto.composer.source === 'goal',
+          taskIds: ids,
+          sequential: true,
+          template: 'queue',
+          durationHours: 48,
         }),
       });
       state.auto.selected = data.sprint.id;
       await api('/api/sprints/' + encodeURIComponent(data.sprint.id) + '/start', { method: 'POST', body: '{}' });
-      document.getElementById('sp-goal').value = '';
-      toast('Sprint started');
+      if (goalEl) goalEl.value = '';
+      state.auto.queueTouched = false;
+      toast('Queue started — ' + ids.length + ' task' + (ids.length === 1 ? '' : 's') + ', one at a time');
       await loadAutomations(true);
     } catch (err) { toast(err.message, true); }
-    finally { button.disabled = false; button.textContent = 'Start sprint'; }
+    finally { button.disabled = false; renderQueuePicker(); }
   }
 
   function selectSprint(id) { state.auto.selected = id; loadAutomations(true); }
@@ -1396,6 +1421,15 @@
       await api('/api/sprints/' + encodeURIComponent(state.auto.selected) + '/steps/' + encodeURIComponent(stepId) + '/retry',
         { method: 'POST', body: '{}' });
       toast('Step queued again');
+      await loadAutomations(true);
+    } catch (err) { toast(err.message, true); }
+  }
+
+  async function skipStep(stepId) {
+    try {
+      await api('/api/sprints/' + encodeURIComponent(state.auto.selected) + '/steps/' + encodeURIComponent(stepId) + '/skip',
+        { method: 'POST', body: '{}' });
+      toast('Skipped — moving to the next task');
       await loadAutomations(true);
     } catch (err) { toast(err.message, true); }
   }
@@ -1444,7 +1478,7 @@
       goalEl.textContent = 'No sprint yet';
       metaEl.textContent = 'Start one above — its stages appear here as they run.';
       controls.innerHTML = '';
-      body.innerHTML = '<div class="empty"><span class="big">🎛️</span>Sprints plan, draft, review and polish your tasks, then wait for your approval.</div>';
+      body.innerHTML = '<div class="empty"><span class="big">🎛️</span>Pick tasks above and run them as a queue — one at a time, in due-date order. A failure or timeout is recorded and the next task starts straight away.</div>';
       picker.classList.add('hidden');
       document.getElementById('sprint-progress').style.width = '0%';
       document.getElementById('sprint-medline').innerHTML = '';
@@ -1469,8 +1503,11 @@
     };
 
     goalEl.textContent = sprint.goal || 'Sprint';
-    metaEl.textContent = (sprint.template || 'generic') + ' · ' + steps.length + ' stages · created ' +
-      new Date(sprint.created_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    metaEl.textContent = sprint.sequential
+      ? 'queue · ' + steps.length + ' task' + (steps.length === 1 ? '' : 's') + ' one at a time · created ' +
+        new Date(sprint.created_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+      : (sprint.template || 'generic') + ' · ' + steps.length + ' stages · created ' +
+        new Date(sprint.created_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
     const actions = [];
     if (sprint.status === 'planning') actions.push('<button class="btn sm primary" onclick="sprintAction(\'start\')">Start</button>');
@@ -1482,13 +1519,15 @@
 
     document.getElementById('sprint-progress').style.width = pct + '%';
     const ends = sprint.ends_at ? new Date(sprint.ends_at) : null;
-    const checkpoint = sprint.checkpoint && sprint.checkpoint.position !== undefined ? 'stage ' + (sprint.checkpoint.position + 1) : 'not yet';
+    const runningStep = steps.find(s => s.status === 'running');
+    const nextStep = runningStep || steps.find(s => s.status === 'pending');
     document.getElementById('sprint-medline').innerHTML =
       '<span>' + pct + '% complete</span>' +
-      '<span>' + done + '/' + steps.length + ' stages</span>' +
-      '<span>checkpoint ' + escapeHtml(checkpoint) + '</span>' +
-      (ends ? '<span>' + (ends > new Date() ? 'ends in ' + relative(ends - new Date()) : 'time budget reached') + '</span>' : '') +
-      '<span>' + state.auto.parallel + ' steps in parallel</span>';
+      '<span>' + done + '/' + steps.length + (sprint.sequential ? ' tasks' : ' stages') + '</span>' +
+      (counts.failed ? '<span style="color:var(--warn)">' + counts.failed + ' failed</span>' : '') +
+      (nextStep ? '<span>' + (runningStep ? 'running: ' : 'next: ') + escapeHtml(nextStep.source_title || nextStep.stage) + '</span>' : '') +
+      '<span>' + (sprint.sequential ? 'one at a time' : state.auto.parallel + ' steps in parallel') + '</span>' +
+      (ends ? '<span>' + (ends > new Date() ? 'ends in ' + relative(ends - new Date()) : 'time budget reached') + '</span>' : '');
 
     if (state.auto.sprints.length > 1) {
       picker.classList.remove('hidden');
@@ -1514,7 +1553,7 @@
     let stagesHtml;
     if (!steps.length) stagesHtml = '<div class="empty">No stages planned.</div>';
     else if (!visibleSteps.length) stagesHtml = emptyState('🎉', 'Nothing here', 'No stages match this filter.', '<button class="btn sm" onclick="setSprintFilter(\'\')">Show all</button>');
-    else stagesHtml = groupStages(visibleSteps, sprint);
+    else stagesHtml = sprint.sequential ? queueRows(visibleSteps, sprint) : groupStages(visibleSteps, sprint);
     body.innerHTML = attentionHtml + stagesHtml;
     renderFeeds(feed);
   }
@@ -1570,6 +1609,46 @@
         rows +
       '</div>';
     }).join('');
+  }
+
+  // A queue is one flat, ordered list of tasks — the order is the run order.
+  function queueRows(steps, sprint) {
+    const rows = steps.map(step => {
+      const taskId = step.source_task_id || step.task_id;
+      const actions = [];
+      if (step.status === 'pending' || step.status === 'failed') {
+        actions.push('<button class="btn sm ghost" onclick="skipStep(\'' + step.id + '\')">Skip</button>');
+      }
+      if (step.status === 'failed') {
+        actions.push('<button class="btn sm" onclick="retryStep(\'' + step.id + '\')">Retry</button>');
+      }
+      if (taskId) {
+        actions.push('<button class="btn sm ghost" onclick="openTask(\'' + taskId + '\')">Task</button>');
+      }
+      const output = String(step.output || step.error || '');
+      const meta = step.error
+        ? escapeHtml(step.error)
+        : (step.status === 'running' ? 'running now' : (step.status === 'pending' ? 'waiting its turn' : 'finished'));
+      return '<div class="step ' + step.status + '">' +
+        '<div class="queue-order">' + (step.position + 1) + '</div>' +
+        '<div class="step-body">' +
+          '<div class="step-line"><span class="step-stage">' + escapeHtml(step.source_title || sprint.goal) + '</span>' +
+            '<span class="pill ' + step.status + '">' + escapeHtml(step.status) + '</span></div>' +
+          '<div class="step-meta">' + meta + '</div>' +
+          (output ? '<details class="step-output"><summary>Output — ' + output.length + ' chars</summary><pre>' + escapeHtml(output.slice(0, 6000)) + '</pre></details>' : '') +
+        '</div>' +
+        '<div class="step-actions">' + actions.join('') + '</div>' +
+      '</div>';
+    }).join('');
+    const ok = steps.filter(s => s.status === 'done').length;
+    const failed = steps.filter(s => s.status === 'failed').length;
+    const skipped = steps.filter(s => s.status === 'skipped').length;
+    return '<div class="stage-group">' +
+      '<div class="stage-group-head"><span>Run order</span>' +
+        '<span class="dim">' + ok + ' done' + (failed ? ' · ' + failed + ' failed' : '') + (skipped ? ' · ' + skipped + ' skipped' : '') +
+        ' · ' + steps.length + ' total</span></div>' +
+      rows +
+    '</div>';
   }
 
   // One feed row, with the full harness output available on demand. `message` is
@@ -1635,7 +1714,7 @@
     { label: 'Go to Fleet', hint: 'G F', run: () => setView('fleet') },
     { label: 'Go to Sprints', hint: 'G S', run: () => setView('automations') },
     { label: 'New task', hint: 'N', run: () => openCreate() },
-    { label: 'Start a sprint', hint: 'S', run: () => { setView('automations'); document.getElementById('sp-goal').focus(); } },
+    { label: 'Queue tasks', hint: 'S', run: () => { setView('automations'); document.getElementById('sp-goal').focus(); } },
     { label: 'Refresh everything', hint: 'R', run: () => { loadTasks(); loadFleet(); loadAutomations(true); } },
     { label: 'Open chat', hint: 'C', run: () => { location.href = '/chat'; } },
     { label: 'Open studio', hint: 'D', run: () => { location.href = '/studio'; } },
@@ -1674,20 +1753,8 @@
   document.querySelectorAll('.rail-btn[data-view]').forEach(btn => {
     btn.addEventListener('click', () => setView(btn.dataset.view));
   });
-  document.querySelectorAll('#sp-durations [data-hours]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      state.auto.composer.hours = Number(btn.dataset.hours);
-      renderComposer();
-    });
-  });
-  document.querySelectorAll('#sp-sources [data-source]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      state.auto.composer.source = btn.dataset.source;
-      renderComposer();
-    });
-  });
   document.getElementById('sp-goal').addEventListener('keydown', ev => {
-    if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) createSprint();
+    if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) createQueue();
   });
 
   document.addEventListener('keydown', ev => {

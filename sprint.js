@@ -11,6 +11,8 @@ export const DEFAULT_DURATION_MS = 10 * 60 * 60 * 1000;
 
 export const STAGE_TEMPLATES = {
   generic: ['research', 'draft', 'review', 'polish'],
+  // One stage, one task: the queue mode used for bulk sequential execution.
+  queue: ['execute'],
   code: ['research', 'draft', 'review', 'polish'],
   docs: ['research', 'outline', 'draft', 'polish'],
   marketing: ['research', 'outline', 'draft', 'polish'],
@@ -18,6 +20,7 @@ export const STAGE_TEMPLATES = {
 };
 
 export const STAGE_ROLE = {
+  execute: 'worker',
   research: 'worker',
   outline: 'worker',
   draft: 'worker',
@@ -26,6 +29,7 @@ export const STAGE_ROLE = {
 };
 
 export const STAGE_INSTRUCTIONS = {
+  execute: 'Do this task end to end. Read whatever the task needs, make the change or produce the deliverable, and report exactly what you did, what you verified and anything still open.',
   research: 'Collect the facts, constraints and open questions that matter for this task. Short bullets, no filler.',
   outline: 'Propose a concrete structure or plan for the deliverable. List the sections or steps in order.',
   draft: 'Write the first complete draft of the deliverable. It must be usable as-is, not a sketch.',
@@ -34,6 +38,7 @@ export const STAGE_INSTRUCTIONS = {
 };
 
 const PACE_LINES = {
+  execute: ['is running', 'is working through'],
   research: ['is digging up the context for', 'collected the facts on'],
   outline: ['sketched a plan for', 'laid out the structure of'],
   draft: ['is drafting', 'is writing the first pass of'],
@@ -89,7 +94,7 @@ export function templateForTask(task = {}) {
   return 'generic';
 }
 
-export function planSprintSteps({ tasks = [], stages, models = [], overrides = {} } = {}) {
+export function planSprintSteps({ tasks = [], stages, models = [], overrides = {}, requiresApproval } = {}) {
   const stageList = (Array.isArray(stages) ? stages : []).filter(stage => STAGE_ROLE[stage]);
   const effective = stageList.length ? stageList : STAGE_TEMPLATES.generic;
   const sources = (Array.isArray(tasks) ? tasks : []).filter(Boolean);
@@ -105,7 +110,7 @@ export function planSprintSteps({ tasks = [], stages, models = [], overrides = {
         source_description: String(source.description || '').slice(0, 4000),
         stage,
         role: STAGE_ROLE[stage],
-        requires_approval: index === effective.length - 1,
+        requires_approval: requiresApproval === false ? false : index === effective.length - 1,
         model: assignFleetRoles(models, overrides).find(r => r.role === STAGE_ROLE[stage])?.model || null,
       });
     });
@@ -116,6 +121,15 @@ export function planSprintSteps({ tasks = [], stages, models = [], overrides = {
 export function buildStepPrompt(step = {}, sprint = {}, context = {}) {
   const previous = Array.isArray(context.previous) ? context.previous.filter(s => s && s.output) : [];
   const title = step.source_title || step.sourceTitle || '';
+  if (step.stage === 'execute') {
+    return [
+      `Task queue: ${sprint.goal || 'bulk task run'}`,
+      `Task: ${title}`,
+      step.source_description ? `Task brief:\n${step.source_description}` : '',
+      STAGE_INSTRUCTIONS.execute,
+      'Reply with the work product only. No preamble, no questions.',
+    ].filter(Boolean).join('\n\n');
+  }
   return [
     `Sustained sprint: ${sprint.goal || 'improve the assigned work'}`,
     `Stage: ${step.stage} · role: ${step.role}`,
@@ -147,6 +161,7 @@ export function createSprints(options = {}) {
     now = () => Date.now(),
     log = console,
     defaultDurationMs = DEFAULT_DURATION_MS,
+    defaultStepTimeoutMs = 20 * 60 * 1000,
     maxParallel = 1,
   } = options;
   if (!store) throw new Error('createSprints needs a store');
@@ -190,8 +205,10 @@ export function createSprints(options = {}) {
     if (!sprint || sprint.status === 'stopped' || sprint.status === 'paused') return sprint;
     const steps = store.listSprintSteps(sprintId);
     if (!steps.length) return sprint;
+    // A failure is recorded, not a blocker: the queue carries on and the sprint
+    // only parks once nothing is left to run.
+    if (steps.some(s => s.status === 'pending' || s.status === 'running')) return sprint;
     const failed = steps.some(s => s.status === 'failed');
-    if (!failed && steps.some(s => s.status === 'pending' || s.status === 'running')) return sprint;
 
     let status = 'done';
     if (failed) status = 'review';
@@ -212,6 +229,11 @@ export function createSprints(options = {}) {
     if (goal.length > 500) throw fail('goal must be 500 characters or fewer');
 
     const template = STAGE_TEMPLATES[input.template] ? input.template : 'generic';
+    // A queue executes whole tasks one after another; it is not a staged pipeline.
+    const sequential = input.sequential === true || template === 'queue';
+    const stepTimeoutMs = Number(input.stepTimeoutMs) > 0
+      ? Math.min(Number(input.stepTimeoutMs), 24 * 3600000)
+      : 0;
     const stageList = (Array.isArray(input.stages) && input.stages.length ? input.stages : STAGE_TEMPLATES[template])
       .filter(stage => STAGE_ROLE[stage]);
     const durationHours = Number(input.durationHours);
@@ -227,6 +249,7 @@ export function createSprints(options = {}) {
       stages: stageList,
       models: input.models,
       overrides,
+      requiresApproval: sequential ? false : undefined,
     });
 
     const sprint = store.createSprint({
@@ -235,12 +258,16 @@ export function createSprints(options = {}) {
       stages: stageList,
       duration_ms: durationMs,
       overrides,
+      sequential,
+      step_timeout_ms: stepTimeoutMs,
       status: 'planning',
     });
 
     for (const step of planned) {
       let taskId = null;
-      if (typeof store.createTask === 'function') {
+      // A queue step runs the source task itself, so it must not create a child
+      // task: the task list and the calendar stay exactly as the operator set them.
+      if (input.createChildTasks !== false && typeof store.createTask === 'function') {
         try {
           const child = store.createTask({
             title: `${step.stage}: ${step.source_title || goal}`.slice(0, 200),
@@ -315,7 +342,9 @@ export function createSprints(options = {}) {
     return updated || sprint;
   }
 
-  // Runs one step and records its outcome, so parallel steps share bookkeeping.
+  // Runs one step and records its outcome. Each step has its own deadline so a
+  // hung harness cannot hold the queue: when the budget runs out the step is
+  // recorded as a timeout and the next task starts immediately.
   async function runStepNow(sprint, step) {
     inFlight.add(step.id);
     store.updateSprintStep(step.id, { status: 'running', error: null });
@@ -324,17 +353,31 @@ export function createSprints(options = {}) {
     }
     feed(sprint.id, 'system', `${step.stage} started (${step.role})`);
 
-    const signal = aborts.get(sprint.id)?.signal;
+    const sprintSignal = aborts.get(sprint.id)?.signal;
+    const stepAbort = new AbortController();
+    const onSprintAbort = () => stepAbort.abort();
+    sprintSignal?.addEventListener('abort', onSprintAbort, { once: true });
+    const budget = Number(sprint.step_timeout_ms) || defaultStepTimeoutMs;
+    let timedOut = false;
+    const timer = budget > 0
+      ? setTimeout(() => { timedOut = true; stepAbort.abort(); }, budget)
+      : null;
+    timer?.unref?.();
+
     try {
       const previous = store.listSprintSteps(sprint.id).filter(s =>
         s.source_task_id === step.source_task_id
         && s.status === 'done'
         && s.position < step.position);
-      const result = await runStep(step, sprint, { previous, sprint, signal });
-      if (signal?.aborted) {
+      const result = await runStep(step, sprint, { previous, sprint, signal: stepAbort.signal, timedOut: () => timedOut });
+      if (sprintSignal?.aborted) {
         // Interrupted, not failed: put the stage back so resume re-runs it.
         store.updateSprintStep(step.id, { status: 'pending', error: null });
         feed(sprint.id, 'system', `${step.stage} interrupted — queued for the next run`);
+      } else if (timedOut) {
+        const error = `step timed out after ${Math.round(budget / 1000)}s`;
+        store.updateSprintStep(step.id, { status: 'failed', error });
+        feed(sprint.id, 'error', `${step.stage} failed: ${error}`);
       } else if (result && result.ok && String(result.text || '').trim()) {
         store.updateSprintStep(step.id, { status: 'done', output: String(result.text), error: null });
         feed(sprint.id, 'stage', `${step.stage} finished (${step.role})`);
@@ -346,22 +389,38 @@ export function createSprints(options = {}) {
         feed(sprint.id, 'error', `${step.stage} failed: ${error}`);
       }
     } catch (err) {
-      if (signal?.aborted) {
+      if (sprintSignal?.aborted) {
         store.updateSprintStep(step.id, { status: 'pending', error: null });
         feed(sprint.id, 'system', `${step.stage} interrupted — queued for the next run`);
+      } else if (timedOut) {
+        const error = `step timed out after ${Math.round(budget / 1000)}s`;
+        store.updateSprintStep(step.id, { status: 'failed', error });
+        feed(sprint.id, 'error', `${step.stage} failed: ${error}`);
       } else {
         store.updateSprintStep(step.id, { status: 'failed', error: err.message });
         feed(sprint.id, 'error', `${step.stage} failed: ${err.message}`);
       }
     } finally {
+      if (timer) clearTimeout(timer);
+      sprintSignal?.removeEventListener('abort', onSprintAbort);
       inFlight.delete(step.id);
     }
   }
 
   // Up to `parallel` steps of different source tasks, so the fleet's workers are
   // pooled instead of one engine doing everything in sequence.
-  function nextBatch(sprintId) {
+  function nextBatch(sprint) {
+    const sprintId = sprint.id;
     const steps = store.listSprintSteps(sprintId);
+
+    // A queue runs exactly one task at a time, in position (due-date) order.
+    // Failures are recorded and skipped over; they never hold the rest back.
+    if (sprint.sequential) {
+      if (steps.some(s => s.status === 'running' || inFlight.has(s.id))) return [];
+      const next = steps.find(s => s.status === 'pending' && !inFlight.has(s.id));
+      return next ? [next] : [];
+    }
+
     // Stages of one source task form a pipeline, so they stay sequential. A
     // goal-only sprint is a single pipeline, pooled across workers by role but
     // never running review against a draft that has not finished.
@@ -394,14 +453,14 @@ export function createSprints(options = {}) {
           continue;
         }
 
-        // A failed stage blocks the stages that depend on it: hold the sprint in
-        // review until a human retries or rejects it.
-        if (store.listSprintSteps(sprint.id).some(s => s.status === 'failed')) {
+        // In a staged sprint a failed stage blocks the stages that depend on it.
+        // A queue keeps going: the first failure must not stall the next task.
+        if (!sprint.sequential && store.listSprintSteps(sprint.id).some(s => s.status === 'failed')) {
           evaluate(sprint.id);
           continue;
         }
 
-        const batch = nextBatch(sprint.id);
+        const batch = nextBatch(sprint);
         if (!batch.length) { evaluate(sprint.id); continue; }
         ran += batch.length;
         await Promise.all(batch.map(step => runStepNow(sprint, step)));
@@ -453,6 +512,22 @@ export function createSprints(options = {}) {
     return store.getSprint(sprint.id);
   }
 
+  // Operator escape hatch: drop a queued or failed step and let the socket move
+  // to the next task without retrying it.
+  function skip(id, stepId) {
+    const sprint = requireSprint(id);
+    const step = store.getSprintStep(stepId);
+    if (!step || step.sprint_id !== sprint.id) throw fail('step not found', 404);
+    if (step.status === 'running') throw fail('stop the queue first, then skip the running task');
+    if (step.status === 'done' || step.status === 'skipped') return sprint;
+    store.updateSprintStep(step.id, { status: 'skipped', error: step.error || 'skipped by operator' });
+    feed(sprint.id, 'system', `${step.source_title || step.stage} skipped`);
+    if (sprint.status !== 'running' && sprint.status !== 'stopped' && sprint.status !== 'done') {
+      store.updateSprint(sprint.id, { status: 'running', finished_at: null });
+    }
+    return evaluate(sprint.id) || sprint;
+  }
+
   // Called once at boot: steps left "running" by a crash go back to the queue, and
   // the next tick picks the sprint up from its checkpoint.
   function resetInterrupted() {
@@ -482,6 +557,7 @@ export function createSprints(options = {}) {
     tick,
     approve,
     retry,
+    skip,
     status,
     resetInterrupted,
     list: (limit) => store.listSprints(limit),

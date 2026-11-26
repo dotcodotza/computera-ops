@@ -148,9 +148,9 @@ function isLoopbackHost(req) {
 }
 
 // Rotating public link: only today's token (or its cookie) opens the app when PUBLIC_MODE is on.
+const LINK_EXPIRED_PAGE = '<!doctype html><title>Link expired</title><p style="font-family:system-ui;padding:24px">This daily link is no longer valid. Ask the master node for today&rsquo;s link.</p>';
 if (PUBLIC_MODE) {
   app.use((req, res, next) => {
-    if (!activeLinkToken) return next();
     // Machine-to-machine entry points authenticate themselves (FLEET_TOKEN), so
     // they stay reachable through a public tunnel without today's link.
     if (req.path === '/api/fleet/join' || req.path === '/api/fleet/heartbeat' || req.path === '/api/fleet/run'
@@ -195,13 +195,17 @@ if (PUBLIC_MODE) {
       }
       return next();
     }
+    // Fail closed: a node with PUBLIC_MODE on but no link token yet (a worker that
+    // auto-tunnels before the rotation reaches it) must not serve the app to the
+    // public just because this node is not today's host.
+    if (!activeLinkToken) return res.status(401).type('html').send(LINK_EXPIRED_PAGE);
     const cookies = String(req.headers.cookie || '').split(';').map(p => p.trim());
     const linkCookie = cookies.find(p => p.startsWith('cops_link='));
     if (linkCookie && sameSecret(decodeURIComponent(linkCookie.slice('cops_link='.length)), activeLinkToken)) {
       req.fleetLinkOk = true;
       return next();
     }
-    res.status(401).type('html').send('<!doctype html><title>Link expired</title><p style="font-family:system-ui;padding:24px">This daily link is no longer valid. Ask the master node for today&rsquo;s link.</p>');
+    res.status(401).type('html').send(LINK_EXPIRED_PAGE);
   });
 
   // Workspace sharing for people holding today's link: files, documents and the
@@ -1991,6 +1995,8 @@ const sprints = createSprints({
   },
   runStep: runSprintStep,
   maxParallel: Math.max(1, Math.min(Number(process.env.SPRINT_PARALLEL || 3) || 3, 4)),
+  // A queued task that hangs must not hold the rest of the queue.
+  defaultStepTimeoutMs: Number(process.env.SPRINT_STEP_TIMEOUT_MS || 20 * 60 * 1000),
 });
 
 // Sprint control changes shared state, so holding today's public link is not enough.
@@ -2055,12 +2061,18 @@ app.post('/api/sprints', fleetRateLimit, requireFleetAction, (req, res) => {
     const tasks = ids
       ? ids.map(getTask).filter(Boolean)
       : (body.goalOnly ? [] : listTasks({}).filter(t => t.status === 'todo' || t.status === 'in_progress'));
+    // A queue runs the selected tasks themselves, one after another: it creates no
+    // child tasks and never touches a due date, so calendar and tasks stay as set.
+    const sequential = body.sequential === true || body.template === 'queue';
     const sprint = sprints.create({
       goal: body.goal,
       tasks,
-      template: body.template,
-      stages: body.stages,
+      template: body.template || (sequential ? 'queue' : undefined),
+      stages: body.stages || (sequential ? ['execute'] : undefined),
       durationHours: body.durationHours,
+      sequential,
+      stepTimeoutMs: Number(body.stepTimeoutMinutes) > 0 ? Number(body.stepTimeoutMinutes) * 60000 : undefined,
+      createChildTasks: !sequential,
       models: fleetModels(),
       overrides: roleOverrides(),
     });
@@ -2078,10 +2090,18 @@ app.get('/api/sprints/:id', fleetRateLimit, requireFleetRead, (req, res) => {
   } catch (err) { res.status(err.status || 404).json({ error: err.message }); }
 });
 
+// Start the next queued task now instead of waiting for the 5s tick.
+function kickSprint() {
+  sprints.tick().catch(err => console.warn('Sprint kick failed:', err.message));
+}
+
 for (const action of ['start', 'resume', 'pause', 'stop']) {
   app.post('/api/sprints/:id/' + action, fleetRateLimit, requireFleetAction, (req, res) => {
-    try { res.json({ sprint: sprints[action](req.params.id) }); }
-    catch (err) { res.status(err.status || 400).json({ error: err.message }); }
+    try {
+      const sprint = sprints[action](req.params.id);
+      if (action === 'start' || action === 'resume') kickSprint();
+      res.json({ sprint });
+    } catch (err) { res.status(err.status || 400).json({ error: err.message }); }
   });
 }
 
@@ -2163,8 +2183,20 @@ app.post('/api/sprints/:id/steps/:stepId/approve', fleetRateLimit, requireFleetA
 });
 
 app.post('/api/sprints/:id/steps/:stepId/retry', fleetRateLimit, requireFleetAction, (req, res) => {
-  try { res.json({ sprint: sprints.retry(req.params.id, req.params.stepId) }); }
-  catch (err) { res.status(err.status || 400).json({ error: err.message }); }
+  try {
+    const sprint = sprints.retry(req.params.id, req.params.stepId);
+    kickSprint();
+    res.json({ sprint });
+  } catch (err) { res.status(err.status || 400).json({ error: err.message }); }
+});
+
+// Drop a queued or failed task and move straight on to the next one.
+app.post('/api/sprints/:id/steps/:stepId/skip', fleetRateLimit, requireFleetAction, (req, res) => {
+  try {
+    const sprint = sprints.skip(req.params.id, req.params.stepId);
+    kickSprint();
+    res.json({ sprint });
+  } catch (err) { res.status(err.status || 400).json({ error: err.message }); }
 });
 
 // Persisted node/exposure state plus live counts, so a restart keeps the same picture.
@@ -2248,7 +2280,10 @@ if (ROLE === 'worker' && !PUBLIC_URL) {
   (async () => {
     try {
       const { spawn } = await import('child_process');
-      const cf = spawn(CLOUDFLARED, ['tunnel', '--url', `http://localhost:${PORT}`, '--http-host-header', `localhost:${PORT}`], { stdio: ['ignore', 'pipe', 'pipe'] });
+      // Keep the tunnel hostname in the Host header: the public gate tells a
+      // tunnel visitor apart from a local one by exactly that header, so forcing
+      // localhost here would leave a PUBLIC_MODE worker open to the internet.
+      const cf = spawn(CLOUDFLARED, ['tunnel', '--url', `http://localhost:${PORT}`], { stdio: ['ignore', 'pipe', 'pipe'] });
       const capture = (chunk) => {
         const m = String(chunk).match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
         if (m && !PUBLIC_URL) {
